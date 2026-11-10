@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 
 DEFAULT_EXTRA_WHEN_UNKNOWN = 600
-DEFAULT_CZYNSZ_WHEN_MENTIONED = 500
 DEFAULT_MEDIA_WHEN_MENTIONED = 350
 
 AMOUNT_RE = re.compile(
@@ -49,14 +48,16 @@ TOTAL_PATTERNS = (
 )
 
 CZYNSZ_PATTERNS = (
+    re.compile(r"\+\s*czynsz\s*:?\s*" + AMOUNT_RE.pattern, re.IGNORECASE),
     re.compile(
-        r"czynsz(?:\s*administracyjny)?[^\d]{0,15}" + AMOUNT_RE.pattern,
+        r"czynsz\s*\(\s*dodatkowo\s*\)\s*:?\s*" + AMOUNT_RE.pattern,
         re.IGNORECASE,
     ),
     re.compile(
-        AMOUNT_RE.pattern + r"[^\d]{0,10}czynsz(?:\s*administracyjny)?",
+        r"czynsz\s*administracyjny\s*:?\s*" + AMOUNT_RE.pattern,
         re.IGNORECASE,
     ),
+    re.compile(r"czynsz\s*:\s*" + AMOUNT_RE.pattern, re.IGNORECASE),
 )
 
 MEDIA_PATTERNS = (
@@ -150,8 +151,11 @@ def analyze_price(listed_price_text: str, description: str = "") -> PriceBreakdo
     inclusive = any(h in blob for h in INCLUSIVE_HINTS)
     czynsz = _first_amount(CZYNSZ_PATTERNS, blob) or 0
     media = _first_amount(MEDIA_PATTERNS, blob) or 0
+    if re.search(r"czynsz\s+najmu", blob) and not re.search(
+        r"czynsz\s*\(\s*dodatkowo|\+\s*czynsz", blob
+    ):
+        czynsz = 0
 
-    mentions_czynsz = bool(re.search(r"czynsz|\+ ?czynsz", blob))
     mentions_media = bool(
         re.search(r"\+ ?media|media osobno|media około|media ok", blob)
     )
@@ -161,9 +165,7 @@ def analyze_price(listed_price_text: str, description: str = "") -> PriceBreakdo
         czynsz = 0
         media = 0
     else:
-        if czynsz == 0 and mentions_czynsz:
-            czynsz = DEFAULT_CZYNSZ_WHEN_MENTIONED
-            estimated = True
+        # Не вигадуємо чинш 500, якщо суми немає — лише явне число.
         if media == 0 and mentions_media:
             media = DEFAULT_MEDIA_WHEN_MENTIONED
             estimated = True

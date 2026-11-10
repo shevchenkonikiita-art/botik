@@ -353,16 +353,45 @@ def _clean_location(location: str) -> str:
     return _LOC_DATE_TAIL.sub("", location).strip(" -,")
 
 
+def parse_czynsz_zl(text: str) -> int | None:
+    """Чинш адміністраційний, не «czynsz najmu» (це оренда) і не слово з заголовка."""
+    if not text:
+        return None
+    patterns = (
+        r"\+\s*czynsz\s*:?\s*([\d \u00a0]+)",
+        r"czynsz\s*\(\s*dodatkowo\s*\)\s*:?\s*([\d \u00a0]+)",
+        r"czynsz\s*administracyjny\s*:?\s*([\d \u00a0]+)",
+        r"czynsz\s*:\s*([\d \u00a0]+)",
+    )
+    for pat in patterns:
+        for match in re.finditer(pat, text, re.IGNORECASE):
+            left = text[max(0, match.start() - 18) : match.start()].lower()
+            if "najmu" in left:
+                continue
+            value = _pl_int(match.group(1))
+            if value is None:
+                continue
+            if 80 <= value <= 3500:
+                return value
+    return None
+
+
+def _sane_czynsz(rent: int | None, czynsz: int | None) -> int:
+    if not czynsz or czynsz <= 0:
+        return 0
+    if rent and czynsz >= int(rent) * 0.85:
+        # «Czynsz 1900!» у заголовку = оренда, не додавати вдруге
+        return 0
+    return int(czynsz)
+
+
 def _fill_card_facts(listing: Listing, text: str) -> None:
     """Чинш, площа, кімнати, ціна — з тексту картки, без відкриття оголошення."""
     blob = text or listing.raw_text or ""
-    czynsz_m = re.search(
-        r"czynsz(?:\s*administracyjny)?\s*[:\s]+([\d \u00a0]+)",
-        blob,
-        re.IGNORECASE,
-    )
-    if czynsz_m and listing.czynsz_zl is None:
-        listing.czynsz_zl = _pl_int(czynsz_m.group(1)) or 0
+    if listing.czynsz_zl is None:
+        parsed = parse_czynsz_zl(blob)
+        if parsed is not None:
+            listing.czynsz_zl = parsed
     area_m = re.search(r"([\d]+(?:[.,]\d+)?)\s*m(?:²|2)\b", blob, re.IGNORECASE)
     if area_m and listing.area_m2 is None:
         listing.area_m2 = float(area_m.group(1).replace(",", "."))
@@ -376,6 +405,9 @@ def _fill_card_facts(listing: Listing, text: str) -> None:
     rent = _pl_int(listing.price) if listing.price else None
     if rent is not None:
         listing.rent_zl = rent
+    if listing.czynsz_zl is not None and listing.rent_zl:
+        if listing.czynsz_zl >= int(listing.rent_zl) * 0.85:
+            listing.czynsz_zl = None
     low = blob.lower()
     if "oferta prywatna" in low or "osoba prywatna" in low:
         listing.owner_hint = "private"
@@ -539,9 +571,16 @@ def listing_rent_czynsz(listing: Listing) -> tuple[int | None, int]:
 
         rent = parse_amount(listing.price)
     czynsz = listing.czynsz_zl
-    if czynsz is None and listing.price_info and not listing.price_info.estimated:
+    if czynsz is None:
+        czynsz = parse_czynsz_zl(listing.raw_text or "")
+    if (
+        czynsz is None
+        and listing.price_info
+        and not listing.price_info.estimated
+        and listing.price_info.czynsz
+    ):
         czynsz = listing.price_info.czynsz
-    return rent, int(czynsz or 0)
+    return rent, _sane_czynsz(rent, czynsz)
 
 
 def listing_total_zl(listing: Listing) -> int | None:
@@ -856,6 +895,78 @@ def fetch_olx_listings(
     return _filter_list(raw, filters, limit)
 
 
+_OTODOM_PRICE_JS = """() => {
+  const el = document.getElementById('__NEXT_DATA__');
+  if (!el || !el.textContent) return {};
+  let data;
+  try { data = JSON.parse(el.textContent); } catch (e) { return {}; }
+  const out = {};
+  const num = (v) => {
+    if (v == null) return null;
+    if (typeof v === 'number' && isFinite(v)) return v;
+    if (typeof v === 'object' && typeof v.value === 'number') return v.value;
+    return null;
+  };
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const rent = num(node.totalPrice);
+    const czynsz = num(node.rentPrice);
+    if (rent != null || czynsz != null) {
+      const rec = { rent, czynsz };
+      if (node.id != null) out[String(node.id)] = rec;
+      const slug = node.slug || node.url || '';
+      if (slug) {
+        const idm = String(slug).match(/ID[A-Za-z0-9]+/);
+        if (idm) out[idm[0]] = rec;
+      }
+    }
+    for (const v of Object.values(node)) {
+      if (v && typeof v === 'object') walk(v);
+    }
+  };
+  walk(data);
+  return out;
+}"""
+
+
+def _apply_otodom_json_prices(page, listings: list[Listing]) -> None:
+    """Otodom: totalPrice = оренда, rentPrice = чинш (назви полів навпаки)."""
+    if not listings:
+        return
+    try:
+        mapping = page.evaluate(_OTODOM_PRICE_JS)
+    except Exception:
+        return
+    if not mapping:
+        return
+    for item in listings:
+        rec = None
+        lid = item.id.split(":", 1)[-1]
+        rec = mapping.get(lid) or mapping.get(item.id)
+        if rec is None:
+            url = item.url or ""
+            for key, val in mapping.items():
+                if key and len(str(key)) >= 6 and str(key) in url:
+                    rec = val
+                    break
+        if not rec:
+            continue
+        rent = rec.get("rent")
+        czynsz = rec.get("czynsz")
+        if rent and not item.rent_zl:
+            item.rent_zl = int(rent)
+            if not item.price or item.price == "cena nieznana":
+                item.price = f"{int(rent)} zł"
+        if czynsz is not None and item.czynsz_zl is None:
+            cz = int(czynsz)
+            if 80 <= cz <= 3500:
+                item.czynsz_zl = cz
+        if item.czynsz_zl is not None and item.rent_zl:
+            if item.czynsz_zl >= int(item.rent_zl) * 0.85:
+                item.czynsz_zl = None
+
+
 def fetch_otodom_listings(
     filters: dict[str, Any],
     limit: int,
@@ -900,6 +1011,7 @@ def fetch_otodom_listings(
             continue
         seen_ids.add(item.id)
         raw.append(item)
+    _apply_otodom_json_prices(page, raw)
     if for_watch:
         return _prefilter_watch_feed(raw)
     return _filter_list(raw, filters, limit)
@@ -1424,13 +1536,9 @@ def is_fresh_for_watch(listing: Listing, days: int) -> bool:
 
 def _apply_detail_text(listing: Listing, blob: str) -> None:
     listing.raw_text = (listing.raw_text + "\n" + blob)[:20000]
-    czynsz_m = re.search(
-        r"Czynsz(?:\s*\([^)]+\))?\s*:?\s*([\d \u00a0]+)",
-        blob,
-        re.IGNORECASE,
-    )
-    if czynsz_m:
-        listing.czynsz_zl = _pl_int(czynsz_m.group(1)) or 0
+    parsed_czynsz = parse_czynsz_zl(blob) or parse_czynsz_zl(listing.raw_text)
+    if parsed_czynsz is not None:
+        listing.czynsz_zl = parsed_czynsz
 
     area_m = re.search(
         r"Powierzchnia\s*:?\s*([\d]+(?:[.,]\d+)?)",
@@ -1486,6 +1594,9 @@ def _apply_detail_text(listing: Listing, blob: str) -> None:
         if rent_m:
             rent = _pl_int(rent_m.group(1))
     listing.rent_zl = rent
+    if listing.czynsz_zl is not None and rent:
+        if listing.czynsz_zl >= int(rent) * 0.85:
+            listing.czynsz_zl = None
     listing.district = (
         detect_district(listing.title, listing.location, blob[:1200])
         or listing.district
@@ -1632,10 +1743,29 @@ def enrich_on_page(page, listing: Listing) -> Listing:
             if t and len(t) > 8 and not _TITLE_SKIP.search(t):
                 listing.title = t[:180]
         _apply_detail_text(listing, text)
+        if "otodom.pl" in (listing.url or ""):
+            _apply_otodom_json_prices(page, [listing])
         listing.details_loaded = True
     except Exception:
         logger.warning("detail skip %s", listing.id, exc_info=True)
     return listing
+
+
+def fill_missing_czynsz(page, listings: list[Listing], *, limit: int = 12) -> None:
+    """OLX картка майже ніколи не має чиншу — беремо зсередини оголошення."""
+    opened = 0
+    for item in listings:
+        if opened >= limit:
+            break
+        if item.czynsz_zl is not None or item.details_loaded:
+            continue
+        if "facebook.com" in (item.url or ""):
+            continue
+        try:
+            enrich_on_page(page, item)
+            opened += 1
+        except Exception:
+            logger.warning("czynsz enrich skip %s", item.id, exc_info=True)
 
 
 def enrich_many(listings: list[Listing]) -> list[Listing]:

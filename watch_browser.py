@@ -14,6 +14,8 @@ from scraper import (
     enrich_on_page,
     fetch_olx_listings,
     fetch_otodom_listings,
+    fill_missing_czynsz,
+    listing_matches_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,18 +56,26 @@ def _ensure_page():
 
 def user_search_listings(filters: dict[str, Any], limit: int = 15) -> list:
     """Меню «Показати зараз» — той самий браузер, що й watch."""
+    f = {**DEFAULT_FILTERS, **filters}
     with _lock:
         page = _ensure_page()
         collected: list = []
         for fetcher in (fetch_olx_listings, fetch_otodom_listings):
             try:
-                collected.extend(fetcher(filters, max(limit, 12), page, page_num=1))
+                collected.extend(
+                    fetcher(f, max(limit, 12), page, page_num=1, for_watch=True)
+                )
             except Exception:
                 logger.exception("user search fetch failed, reset browser")
                 _reset_unlocked()
                 page = _ensure_page()
-                collected.extend(fetcher(filters, max(limit, 12), page, page_num=1))
-        return _dedupe(collected, limit * 2)
+                collected.extend(
+                    fetcher(f, max(limit, 12), page, page_num=1, for_watch=True)
+                )
+        collected = _dedupe(collected, limit * 3)
+        fill_missing_czynsz(page, collected, limit=min(12, len(collected)))
+        matched = [x for x in collected if listing_matches_user(x, f)]
+        return matched[: limit * 2]
 
 
 def watch_fetch_listings(filters: dict[str, Any], per_source: int) -> list:
@@ -187,6 +197,11 @@ def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
             break
     late = datetime.max.replace(tzinfo=ZoneInfo("Europe/Warsaw"))
     fresh.sort(key=lambda x: listing_posted_at(x) or late)
+    f = {**DEFAULT_FILTERS, **filters}
+    with _lock:
+        page = _ensure_page()
+        fill_missing_czynsz(page, fresh, limit=min(16, len(fresh)))
+    fresh = [x for x in fresh if listing_matches_user(x, f)]
     logger.info("week archive oldest→newest: %s", len(fresh))
     return fresh
 

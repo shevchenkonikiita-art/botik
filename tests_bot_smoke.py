@@ -12,15 +12,19 @@ from handlers.texts import home_text, welcome_text
 from notify_util import in_quiet_hours
 from scraper import (
     Listing,
+    _apply_detail_text,
     _clean_location,
+    _fill_card_facts,
     _stamp_posted_from_card,
     format_posted_dt,
     is_fresh_for_watch,
     listing_from_snapshot,
     listing_matches_user,
     listing_posted_within,
+    listing_rent_czynsz,
     listing_snapshot,
     parse_card_posted,
+    parse_czynsz_zl,
 )
 from watch_browser import watch_fetch_listings
 
@@ -122,6 +126,62 @@ def test_budget_rent_plus_czynsz() -> None:
     assert f"Додано о {posted:%H:%M}" in today.format_caption()
 
 
+def test_czynsz_not_doubled_from_title() -> None:
+    assert parse_czynsz_zl("Kawalerka Grunwald Czynsz 1900!") is None
+    assert parse_czynsz_zl("Czynsz (dodatkowo): 400 zł") == 400
+    assert parse_czynsz_zl("+ czynsz: 929 zł/miesiąc") == 929
+    assert parse_czynsz_zl("czynsz administracyjny: 850 zł") == 850
+    assert parse_czynsz_zl("Czynsz: 720 zł") == 720
+    assert parse_czynsz_zl("czynsz najmu: 2500 zł") is None
+
+    doubled = Listing(
+        id="olx:double",
+        title="Kawalerka Grunwald Czynsz 1900!",
+        price="1900 zł",
+        location="Poznań, Grunwald",
+        area="28 m²",
+        url="https://www.olx.pl/d/oferta/x",
+        raw_text="Kawalerka Grunwald Czynsz 1900!\n1 900 zł",
+    )
+    _fill_card_facts(doubled, doubled.raw_text)
+    rent, czynsz = listing_rent_czynsz(doubled)
+    assert rent == 1900
+    assert czynsz == 0
+
+    olx = Listing(
+        id="olx:detail",
+        title="2 pokoje Wilda",
+        price="2950 zł",
+        location="Poznań, Wilda",
+        area="38 m²",
+        url="https://www.olx.pl/d/oferta/y",
+        rent_zl=2950,
+        raw_text="2 pokoje Wilda\n2 950 zł",
+    )
+    _apply_detail_text(
+        olx,
+        "Czynsz (dodatkowo): 400 zł\nPowierzchnia: 38 m²\nLiczba pokoi: 2",
+    )
+    rent, czynsz = listing_rent_czynsz(olx)
+    assert rent == 2950
+    assert czynsz == 400
+    assert "2 950 zł + czynsz 400 = 3 350 zł" in olx.format_caption()
+
+    otodom = Listing(
+        id="otodom:card",
+        title="Mieszkanie Jeżyce",
+        price="3200 zł",
+        location="Jeżyce, Poznań",
+        area="42 m²",
+        url="https://www.otodom.pl/pl/oferta/x",
+        raw_text="Mieszkanie Jeżyce\n3 200 zł\n+ czynsz: 929 zł/miesiąc\n42 m²",
+    )
+    _fill_card_facts(otodom, otodom.raw_text)
+    rent, czynsz = listing_rent_czynsz(otodom)
+    assert rent == 3200
+    assert czynsz == 929
+
+
 def test_imports_and_keyboards() -> None:
     db.init_db()
     f = {**DEFAULT_FILTERS, "setup_done": True}
@@ -168,6 +228,7 @@ def test_quiet_hours_toggle() -> None:
 def main() -> int:
     test_card_dates()
     test_budget_rent_plus_czynsz()
+    test_czynsz_not_doubled_from_title()
     test_imports_and_keyboards()
     test_watch_pipeline()
     test_snapshot_roundtrip()
