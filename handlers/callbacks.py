@@ -308,9 +308,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_message(
             chat_id=user_id,
             text=(
-                "📅 Збираю оголошення OLX і Otodom лише за останні 7 днів "
-                "(від найновіших).\n"
-                "Це може зайняти близько хвилини — надішлю всі картки одразу."
+                "📅 Збираю всі оголошення за 7 днів з OLX і Otodom, від найновіших.\n"
+                "Це архів. Щойно викладене приходить саме, без цієї кнопки."
             ),
         )
         user_first_on()
@@ -318,7 +317,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             try:
                 week = await asyncio.wait_for(
                     run_browser(watch_week_listings, filters, 7),
-                    timeout=90,
+                    timeout=240,
                 )
             except TimeoutError:
                 await context.bot.send_message(

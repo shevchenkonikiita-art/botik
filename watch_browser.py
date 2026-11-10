@@ -107,36 +107,73 @@ def watch_fetch_listings(filters: dict[str, Any], per_source: int) -> list:
         return _dedupe(collected)
 
 
+def _page_older_than(batch: list, days: int) -> bool:
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from scraper import listing_posted_at
+
+    moments = [listing_posted_at(x) for x in batch]
+    dated = [m for m in moments if m is not None]
+    if len(dated) < 4:
+        return False
+    cutoff = datetime.now(ZoneInfo("Europe/Warsaw")) - timedelta(days=days)
+    return all(m < cutoff for m in dated)
+
+
 def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
-    """Перша сторінка OLX + Otodom (найновіші), без відсіву «немає дати» до відкриття картки."""
+    """Усі оголошення за `days` днів з OLX і Otodom, від найновіших."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     from scraper import listing_matches_user, listing_posted_at, listing_posted_within
 
     f = {**DEFAULT_FILTERS, **filters}
     with _lock:
         page = _ensure_page()
-        collected: list = []
+        kept: list = []
         for fetcher in (fetch_olx_listings, fetch_otodom_listings):
-            try:
-                collected.extend(fetcher(f, 20, page, page_num=1))
-            except Exception:
-                logger.exception("week fetch failed, reset browser")
-                _reset_unlocked()
-                page = _ensure_page()
-                collected.extend(fetcher(f, 20, page, page_num=1))
-        matched = [
-            x for x in _dedupe(collected) if listing_matches_user(x, f)
-        ][:8]
+            for page_num in range(1, 8):
+                try:
+                    batch = fetcher(f, 36, page, page_num=page_num)
+                except Exception:
+                    logger.exception("week page failed, reset browser")
+                    _reset_unlocked()
+                    page = _ensure_page()
+                    try:
+                        batch = fetcher(f, 36, page, page_num=page_num)
+                    except Exception:
+                        logger.exception("week page retry failed")
+                        break
+                if not batch:
+                    break
+                for item in batch:
+                    if not listing_matches_user(item, f):
+                        continue
+                    moment = listing_posted_at(item)
+                    if moment is None and page_num <= 2:
+                        kept.append(item)
+                    elif moment is not None and listing_posted_within(item, days):
+                        kept.append(item)
+                if _page_older_than(batch, days):
+                    break
+        matched = _dedupe(kept)
         for item in matched:
+            if listing_posted_at(item) is not None and item.details_loaded:
+                continue
             try:
                 enrich_on_page(page, item)
             except Exception:
                 logger.warning("week enrich skip %s", item.id, exc_info=True)
         fresh = []
         for item in matched:
-            if listing_posted_at(item) is None or listing_posted_within(item, days):
+            moment = listing_posted_at(item)
+            if moment is None or listing_posted_within(item, days):
                 fresh.append(item)
-        logger.info("week button: %s of %s cards", len(fresh), len(matched))
-        return fresh
+        oldest = datetime.min.replace(tzinfo=ZoneInfo("Europe/Warsaw"))
+        fresh.sort(key=lambda x: listing_posted_at(x) or oldest, reverse=True)
+        logger.info("week archive: %s listings", len(fresh))
+        return fresh[:80]
 
 
 def watch_enrich_many(listings: list, yield_to_user: bool = True) -> list:

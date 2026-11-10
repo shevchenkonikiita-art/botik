@@ -335,6 +335,19 @@ def _stamp_posted_from_card(listing: Listing, text: str) -> None:
         label = describe_posted(snippet)
         if label:
             listing.posted_label = label
+    if listing.extras.get("posted_iso"):
+        return
+    rel = re.search(
+        r"(?:odświeżono|odswiezono\s+)?(dzisiaj|dzis|wczoraj)(?:\s+o\s+\d{1,2}:\d{2})?",
+        text,
+        re.IGNORECASE,
+    )
+    if not rel:
+        return
+    moment = _plausible_posted(parse_pl_datetime(rel.group(0)) or datetime.now(WARSAW_TZ))
+    if moment:
+        listing.extras["posted_iso"] = moment.isoformat()
+        listing.posted_label = format_posted_dt(moment)
 
 
 def _enrich(listing: Listing) -> Listing:
@@ -1161,7 +1174,14 @@ def is_within_days(listing: Listing, days: int = 7, *, strict: bool = False) -> 
 
 
 def is_fresh_for_watch(listing: Listing, days: int) -> bool:
-    """Авто-сповіщення: лише з датою в межах вікна (після enrich)."""
+    """Миттєве сповіщення: нове id зі стрічки «найновіші».
+
+    Відома стара дата — не шлемо (це кнопка «За 7 днів»).
+    Дати немає — оголошення щойно з’явилось у верху стрічки, шлемо.
+    """
+    moment = listing_posted_at(listing)
+    if moment is None:
+        return True
     return listing_posted_within(listing, days)
 
 
