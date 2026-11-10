@@ -87,14 +87,6 @@ async def send_listing(
     *,
     prefix: str = "",
 ) -> None:
-    if not item.details_loaded:
-        from browser_executor import run_browser
-        from watch_browser import watch_enrich_many
-
-        done = await run_browser(watch_enrich_many, [item], yield_to_user=False)
-        if done:
-            item = done[0]
-
     display_tz = db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
     markup = listing_keyboard(item.url, item.maps_url())
     urls = [u for u in (item.photos or []) if u]

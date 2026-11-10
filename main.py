@@ -37,7 +37,7 @@ from scraper import (
     listing_record,
     listing_snapshot,
 )
-from watch_browser import watch_enrich_many, watch_fetch_listings
+from watch_browser import watch_fetch_listings
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -132,18 +132,12 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for x in unseen
         if any(watch_might_match_user(x, user_filters[uid]) for uid in ready)
     ]
-    to_enrich = matched[:6]
-    # решта підхожих лишаються unseen на наступний цикл; чужі — позначаємо одразу
+    to_send = matched[:8]
     drop_ids = [x.id for x in unseen if x not in matched]
-    if to_enrich:
-        try:
-            await run_browser(watch_enrich_many, to_enrich)
-        except Exception:
-            logger.exception("enrich failed")
-
+    leftover = [x.id for x in matched[8:]]
     brand_new = [
         x
-        for x in to_enrich
+        for x in to_send
         if is_fresh_for_watch(x, NEW_LISTING_MAX_AGE_DAYS)
     ]
     brand_new.sort(
@@ -151,7 +145,9 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         or datetime.now(timezone.utc),
         reverse=True,
     )
-    db.mark_seen_many(drop_ids + [x.id for x in to_enrich])
+    db.mark_seen_many(drop_ids + [x.id for x in to_send])
+    if leftover:
+        logger.info("watch leftover %s for next cycle", len(leftover))
 
     if not brand_new:
         return

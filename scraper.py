@@ -449,7 +449,7 @@ def _matches_districts(listing: Listing, districts: list[str]) -> bool:
         listing.raw_text[:1200],
     )
     if not found:
-        return False
+        return True
     return found in districts
 
 

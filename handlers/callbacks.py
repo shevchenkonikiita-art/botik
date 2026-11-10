@@ -46,7 +46,7 @@ from scraper import (
     listing_posted_within,
     listing_record,
 )
-from watch_browser import user_search_listings, watch_enrich_many, watch_week_listings
+from watch_browser import user_search_listings, watch_week_page
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,6 @@ def _keep_if_not_old(item: Listing, days: int = 7) -> bool:
 
 async def _run_search(filters: dict[str, Any], limit: int = 8) -> list[Listing]:
     listings = await run_browser(user_search_listings, filters, max(limit, 12))
-    listings = [
-        x for x in listings if listing_matches_user(x, filters) and _keep_if_not_old(x, 7)
-    ][:limit]
-    if listings:
-        listings = await run_browser(watch_enrich_many, listings, yield_to_user=False)
     listings = [
         x for x in listings if listing_matches_user(x, filters) and _keep_if_not_old(x, 7)
     ]
@@ -313,52 +308,54 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ),
         )
         user_first_on()
+        sent = 0
+        seen_ids: set[str] = set()
         try:
-            try:
-                week = await asyncio.wait_for(
-                    run_browser(watch_week_listings, filters, 7),
-                    timeout=240,
-                )
-            except TimeoutError:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text="⏱ Занадто довго. Спробуй «Показати зараз».",
-                    reply_markup=main_menu_keyboard(),
-                )
-                return
-            except Exception as exc:
-                logger.exception("week search failed")
-                await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
-                return
-            if not week:
+            for page_num in range(1, 7):
+                try:
+                    batch, stop = await asyncio.wait_for(
+                        run_browser(watch_week_page, filters, page_num, 7),
+                        timeout=50,
+                    )
+                except TimeoutError:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text="⏱ Сторінка довго грузилась, надсилаю те, що вже є.",
+                    )
+                    break
+                except Exception as exc:
+                    logger.exception("week page failed")
+                    await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
+                    break
+                for item in batch:
+                    if item.id in seen_ids:
+                        continue
+                    if not listing_matches_user(item, filters):
+                        continue
+                    seen_ids.add(item.id)
+                    db.upsert_catalog(listing_record(item))
+                    try:
+                        await send_listing(context, user_id, item)
+                        sent += 1
+                    except Exception:
+                        logger.exception("week send failed %s", item.id)
+                if stop:
+                    break
+            if sent == 0:
                 await context.bot.send_message(
                     chat_id=user_id,
                     text="За 7 днів під ці фільтри нічого не знайшов.",
                     reply_markup=main_menu_keyboard(),
                 )
-                return
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"Знайшов {len(week)}. Надсилаю.",
-            )
-            seen = db.load_seen()
-            for item in week:
-                db.upsert_catalog(listing_record(item))
-                seen.add(item.id)
-                try:
-                    await send_listing(context, user_id, item)
-                except Exception:
-                    logger.exception("week send failed %s", item.id)
-            db.save_seen(seen)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"✅ Надіслав {len(week)} оголошень за останні 7 днів "
-                    "під твої фільтри.\n"
-                    "Нові й далі приходитимуть самі."
-                ),
-                reply_markup=main_menu_keyboard(),
-            )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"✅ Надіслав {sent} оголошень за 7 днів, від найновіших.\n"
+                        "Нові з OLX/Otodom приходитимуть самі, щойно з’являться."
+                    ),
+                    reply_markup=main_menu_keyboard(),
+                )
         finally:
             user_first_off()
         return
