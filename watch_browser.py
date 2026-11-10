@@ -6,14 +6,17 @@ import logging
 import threading
 from typing import Any
 
-from config import WATCH_PAGES
+from config import DEFAULT_FILTERS, WATCH_PAGES
 from scraper import (
+    _collect_last_days_raw,
     _dedupe,
+    _finalize_week_batch,
     _open_browser,
     enrich_on_page,
     fetch_olx_listings,
     fetch_otodom_listings,
 )
+from config import DEFAULT_FILTERS
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,20 @@ def watch_fetch_listings(filters: dict[str, Any], per_source: int) -> list:
                         )
                     )
         return _dedupe(collected)
+
+
+def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
+    """«За 7 днів» — один Chromium, коротший скан (Railway)."""
+    f = {**DEFAULT_FILTERS, **filters}
+    with _lock:
+        page = _ensure_page()
+        matched = _collect_last_days_raw(page, f, days, max_pages=3)[:25]
+        for item in matched[:12]:
+            try:
+                enrich_on_page(page, item)
+            except Exception:
+                logger.warning("week enrich skip %s", item.id, exc_info=True)
+        return _finalize_week_batch(matched, f, days)
 
 
 def watch_enrich_many(listings: list) -> list:

@@ -39,13 +39,8 @@ from handlers.texts import (
     wizard_districts_text,
     wizard_rooms_text,
 )
-from scraper import (
-    Listing,
-    collect_last_days,
-    listing_matches_user,
-    listing_record,
-)
-from watch_browser import user_search_listings, watch_enrich_many
+from scraper import Listing, listing_matches_user, listing_record
+from watch_browser import user_search_listings, watch_enrich_many, watch_week_listings
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +284,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ),
         )
         try:
-            week = await run_browser(collect_last_days, filters, 7)
+            week = await asyncio.wait_for(
+                run_browser(watch_week_listings, filters, 7),
+                timeout=200,
+            )
+        except TimeoutError:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "⏱ Занадто довго (Railway). Спробуй «Показати зараз» — "
+                    "або «За 7 днів» ще раз через хвилину."
+                ),
+                reply_markup=main_menu_keyboard(),
+            )
+            return
         except Exception as exc:
             logger.exception("week search failed")
             await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")

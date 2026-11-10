@@ -1338,50 +1338,50 @@ def _in_last_days_window(listing: Listing, days: int) -> bool:
     return is_within_days(listing, days, strict=False)
 
 
-def collect_last_days(
-    filters: dict[str, Any] | None = None,
-    days: int = 7,
-    max_pages: int = 10,
+def _collect_last_days_raw(
+    page,
+    f: dict[str, Any],
+    days: int,
+    *,
+    max_pages: int = 3,
 ) -> list[Listing]:
-    """Усі оголошення OLX і Otodom за останні `days` днів під фільтри користувача."""
-    f = {**DEFAULT_FILTERS, **(filters or {})}
     collected: list[Listing] = []
-    matched: list[Listing] = []
-    playwright, browser, page = _open_browser()
-    try:
-        for fetcher in (fetch_olx_listings, fetch_otodom_listings):
+    for fetcher in (fetch_olx_listings, fetch_otodom_listings):
+        empty_hits = 0
+        for page_num in range(1, max_pages + 1):
+            try:
+                batch = fetcher(f, 36, page, page_num=page_num)
+            except Exception:
+                logger.exception("page failed %s p%s", fetcher.__name__, page_num)
+                break
+            if not batch:
+                empty_hits += 1
+                if empty_hits >= 2:
+                    break
+                continue
             empty_hits = 0
-            for page_num in range(1, max_pages + 1):
-                try:
-                    batch = fetcher(f, 36, page, page_num=page_num)
-                except Exception:
-                    logger.exception("page failed %s p%s", fetcher.__name__, page_num)
-                    break
-                if not batch:
-                    empty_hits += 1
-                    if empty_hits >= 2:
-                        break
-                    continue
-                empty_hits = 0
-                collected.extend(batch)
-                hits = sum(
-                    1
-                    for item in batch
-                    if listing_matches_user(item, f) and is_within_days(item, days)
-                )
-                if hits == 0 and page_num >= 4:
-                    break
-        matched = [
-            item
-            for item in _dedupe(collected)
-            if listing_matches_user(item, f) and is_within_days(item, days)
-        ][:60]
-        for item in matched:
-            enrich_on_page(page, item)
-    finally:
-        browser.close()
-        playwright.stop()
+            collected.extend(batch)
+            hits = sum(
+                1
+                for item in batch
+                if listing_matches_user(item, f) and is_within_days(item, days)
+            )
+            if hits == 0 and page_num >= 2:
+                break
+    return [
+        item
+        for item in _dedupe(collected)
+        if listing_matches_user(item, f) and is_within_days(item, days)
+    ]
 
+
+def _finalize_week_batch(
+    matched: list[Listing],
+    f: dict[str, Any],
+    days: int,
+    *,
+    result_limit: int = 20,
+) -> list[Listing]:
     fresh = [
         item
         for item in matched
@@ -1391,6 +1391,26 @@ def collect_last_days(
         key=lambda x: listing_posted_at(x) or datetime.min.replace(tzinfo=WARSAW_TZ),
         reverse=True,
     )
+    return fresh[:result_limit]
+
+
+def collect_last_days(
+    filters: dict[str, Any] | None = None,
+    days: int = 7,
+    max_pages: int = 3,
+) -> list[Listing]:
+    """Оголошення за останні `days` днів (обмежений скан для хмари)."""
+    f = {**DEFAULT_FILTERS, **(filters or {})}
+    playwright, browser, page = _open_browser()
+    try:
+        matched = _collect_last_days_raw(page, f, days, max_pages=max_pages)[:25]
+        for item in matched[:12]:
+            enrich_on_page(page, item)
+    finally:
+        browser.close()
+        playwright.stop()
+
+    fresh = _finalize_week_batch(matched, f, days)
     logger.info("Last %s days: %s listings", days, len(fresh))
     return fresh
 
