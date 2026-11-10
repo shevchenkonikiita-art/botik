@@ -39,7 +39,13 @@ from handlers.texts import (
     wizard_districts_text,
     wizard_rooms_text,
 )
-from scraper import Listing, listing_matches_user, listing_posted_within, listing_record
+from scraper import (
+    Listing,
+    listing_matches_user,
+    listing_posted_at,
+    listing_posted_within,
+    listing_record,
+)
 from watch_browser import user_search_listings, watch_enrich_many, watch_week_listings
 
 logger = logging.getLogger(__name__)
@@ -75,15 +81,22 @@ async def _edit(update: Update, text: str, reply_markup=None) -> None:
             logger.exception("failed to send fallback menu message")
 
 
+def _keep_if_not_old(item: Listing, days: int = 7) -> bool:
+    """Сторінка «найновіші»: без дати лишаємо, з датою — лише якщо не старіша за days."""
+    if listing_posted_at(item) is None:
+        return True
+    return listing_posted_within(item, days)
+
+
 async def _run_search(filters: dict[str, Any], limit: int = 8) -> list[Listing]:
-    listings = await run_browser(user_search_listings, filters, max(limit, 16))
+    listings = await run_browser(user_search_listings, filters, max(limit, 12))
     listings = [
-        x for x in listings if listing_matches_user(x, filters) and listing_posted_within(x, 7)
+        x for x in listings if listing_matches_user(x, filters) and _keep_if_not_old(x, 7)
     ][:limit]
     if listings:
-        listings = await run_browser(watch_enrich_many, listings)
+        listings = await run_browser(watch_enrich_many, listings, yield_to_user=False)
     listings = [
-        x for x in listings if listing_matches_user(x, filters) and listing_posted_within(x, 7)
+        x for x in listings if listing_matches_user(x, filters) and _keep_if_not_old(x, 7)
     ]
     return listings[:limit]
 

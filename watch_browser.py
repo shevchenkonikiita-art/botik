@@ -9,9 +9,7 @@ from typing import Any
 from browser_executor import user_waiting
 from config import DEFAULT_FILTERS, WATCH_PAGES
 from scraper import (
-    _collect_last_days_raw,
     _dedupe,
-    _finalize_week_batch,
     _open_browser,
     enrich_on_page,
     fetch_olx_listings,
@@ -110,20 +108,38 @@ def watch_fetch_listings(filters: dict[str, Any], per_source: int) -> list:
 
 
 def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
-    """«За 7 днів» — один Chromium, коротший скан (Railway)."""
+    """Перша сторінка OLX + Otodom (найновіші), без відсіву «немає дати» до відкриття картки."""
+    from scraper import listing_matches_user, listing_posted_at, listing_posted_within
+
     f = {**DEFAULT_FILTERS, **filters}
     with _lock:
         page = _ensure_page()
-        matched = _collect_last_days_raw(page, f, days, max_pages=3)[:25]
-        for item in matched[:12]:
+        collected: list = []
+        for fetcher in (fetch_olx_listings, fetch_otodom_listings):
+            try:
+                collected.extend(fetcher(f, 20, page, page_num=1))
+            except Exception:
+                logger.exception("week fetch failed, reset browser")
+                _reset_unlocked()
+                page = _ensure_page()
+                collected.extend(fetcher(f, 20, page, page_num=1))
+        matched = [
+            x for x in _dedupe(collected) if listing_matches_user(x, f)
+        ][:8]
+        for item in matched:
             try:
                 enrich_on_page(page, item)
             except Exception:
                 logger.warning("week enrich skip %s", item.id, exc_info=True)
-        return _finalize_week_batch(matched, f, days)
+        fresh = []
+        for item in matched:
+            if listing_posted_at(item) is None or listing_posted_within(item, days):
+                fresh.append(item)
+        logger.info("week button: %s of %s cards", len(fresh), len(matched))
+        return fresh
 
 
-def watch_enrich_many(listings: list) -> list:
+def watch_enrich_many(listings: list, yield_to_user: bool = True) -> list:
     with _lock:
         page = _ensure_page()
         pending = [
@@ -132,7 +148,7 @@ def watch_enrich_many(listings: list) -> list:
             if not x.details_loaded and "facebook.com" not in (x.url or "")
         ]
         for item in pending:
-            if user_waiting():
+            if yield_to_user and user_waiting():
                 logger.info("watch enrich yields to menu button")
                 break
             try:

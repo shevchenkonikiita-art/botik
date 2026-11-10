@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 import db
 from config import DISPLAY_TZ
 from handlers.keyboards import listing_keyboard
-from scraper import Listing, load_listing_details
+from scraper import Listing
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,11 @@ async def send_listing(
 ) -> None:
     if not item.details_loaded:
         from browser_executor import run_browser
+        from watch_browser import watch_enrich_many
 
-        item = await run_browser(load_listing_details, item)
+        done = await run_browser(watch_enrich_many, [item], yield_to_user=False)
+        if done:
+            item = done[0]
 
     display_tz = db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
     markup = listing_keyboard(item.url, item.maps_url())
