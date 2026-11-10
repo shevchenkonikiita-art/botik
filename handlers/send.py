@@ -91,10 +91,22 @@ async def send_listing(
 ) -> None:
     display_tz = display_tz or db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
     markup = listing_keyboard(item.url, item.maps_url())
-    urls = [u for u in (item.photos or []) if u and str(u).startswith("http")]
-    if item.photo_url and str(item.photo_url).startswith("http"):
-        if item.photo_url not in urls:
-            urls.insert(0, item.photo_url)
+    from scraper import _normalize_img_url
+
+    raw_urls = list(item.photos or [])
+    if item.photo_url:
+        raw_urls.insert(0, item.photo_url)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_urls:
+        url = _normalize_img_url(str(raw or ""))
+        if not url.startswith("http"):
+            continue
+        key = url.split(";")[0].split("?")[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
 
     headers = _photo_headers(item)
     files: list[BytesIO] = []

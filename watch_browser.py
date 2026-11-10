@@ -125,7 +125,7 @@ def watch_week_page(
     filters: dict[str, Any], page_num: int, days: int = 7
 ) -> tuple[list, bool]:
     """Одна сторінка OLX + Otodom. Повертає (картки, чи далі вже старіше 7 днів)."""
-    from scraper import listing_matches_user, listing_posted_at, listing_posted_within
+    from scraper import listing_matches_user, listing_posted_within
 
     f = {**DEFAULT_FILTERS, **filters}
     with _lock:
@@ -135,13 +135,13 @@ def watch_week_page(
         any_batch = False
         for fetcher in (fetch_olx_listings, fetch_otodom_listings):
             try:
-                batch = fetcher(f, 36, page, page_num=page_num)
+                batch = fetcher(f, 36, page, page_num=page_num, for_watch=True)
             except Exception:
                 logger.exception("week page failed, reset")
                 _reset_unlocked()
                 page = _ensure_page()
                 try:
-                    batch = fetcher(f, 36, page, page_num=page_num)
+                    batch = fetcher(f, 36, page, page_num=page_num, for_watch=True)
                 except Exception:
                     logger.exception("week page retry failed")
                     batch = []
@@ -152,41 +152,39 @@ def watch_week_page(
             for item in batch:
                 if not listing_matches_user(item, f):
                     continue
-                moment = listing_posted_at(item)
-                if moment is None or listing_posted_within(item, days):
-                    collected.append(item)
+                if not listing_posted_within(item, days):
+                    continue
+                collected.append(item)
         stop = (not any_batch) or (page_num >= 2 and older)
         return _dedupe(collected), stop
 
 
 def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
-    """Архів за 7 днів: збираємо всі картки, дати як на сайті (Warsaw), від найстарших."""
+    """Архів за 7 днів з карток списку (фото+дата), без відкриття кожного оголошення."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     from scraper import listing_posted_at, listing_posted_within
 
     kept: list = []
-    for page_num in range(1, 7):
+    for page_num in range(1, 5):
         batch, stop = watch_week_page(filters, page_num, days)
         kept.extend(batch)
-        if stop:
+        if stop or len(_dedupe(kept)) >= 30:
             break
-    matched = _dedupe(kept)[:40]
-    with _lock:
-        page = _ensure_page()
-        for item in matched:
-            try:
-                enrich_on_page(page, item)
-            except Exception:
-                logger.warning("week enrich skip %s", item.id, exc_info=True)
-            if item.photo_url and not item.photos:
-                item.photos = [item.photo_url]
     fresh = []
-    for item in matched:
-        moment = listing_posted_at(item)
-        if moment is None or listing_posted_within(item, days):
-            fresh.append(item)
+    seen = set()
+    for item in _dedupe(kept):
+        if item.id in seen:
+            continue
+        if not listing_posted_within(item, days):
+            continue
+        if item.photo_url and not item.photos:
+            item.photos = [item.photo_url]
+        seen.add(item.id)
+        fresh.append(item)
+        if len(fresh) >= 30:
+            break
     late = datetime.max.replace(tzinfo=ZoneInfo("Europe/Warsaw"))
     fresh.sort(key=lambda x: listing_posted_at(x) or late)
     logger.info("week archive oldest→newest: %s", len(fresh))

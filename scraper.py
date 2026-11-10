@@ -29,7 +29,14 @@ PRIVATE_HINTS = ("prywatn", "bez pośrednik", "bezposrednio", "bezpośrednio", "
 AGENCY_HINTS = ("biuro", "agency", "pośrednik", "posrednik", "oferta biura")
 ROOMS_RE = re.compile(r"(\d+)\s*(?:pokoj|pok\.|room)", re.IGNORECASE)
 _TITLE_SKIP = re.compile(
-    r"^(dodane|dzisiaj|dzis|wczoraj|odświe|odswie|today|yesterday|\d+\s+(?:minut|godzin))",
+    r"^(dodane|dzisiaj|dzis|wczoraj|odświe|odswie|today|yesterday|"
+    r"\d+\s+(?:minut|godzin)|"
+    r"\d+\s*/\s*\d+|"
+    r"promowane|liczba pokoi|piętro|pietro|cena za metr|\+?\s*czynsz)",
+    re.IGNORECASE,
+)
+_LOC_DATE_TAIL = re.compile(
+    r"\s*[-–]\s*(?:odświeżono\s+dnia\s+)?\d{1,2}\s+[a-ząćęłńóśźż]+(?:\s+\d{4})?\s*$",
     re.IGNORECASE,
 )
 WARSAW_TZ = ZoneInfo("Europe/Warsaw")
@@ -149,7 +156,11 @@ class Listing:
             except ValueError:
                 posted = self.posted_label or describe_posted(self.location)
         else:
-            posted = self.posted_label or describe_posted(self.location)
+            posted = (
+                self.posted_label
+                or describe_posted(self.raw_text)
+                or describe_posted(self.location)
+            )
 
         lines = [title, "", price_line]
         if self.street:
@@ -327,104 +338,134 @@ def _infer_rooms(text: str) -> int | None:
 
 
 def _stamp_posted_from_card(listing: Listing, text: str) -> None:
-    """Дата з картки списку (до відкриття detail) — лише «Dodane …», не весь опис."""
+    """Дата з картки: «Poznań, X - 09 listopada 2026», Odświeżono, Dodane wczoraj."""
     if listing.extras.get("posted_iso"):
         return
-    dodane = re.search(r"Dodane\s+([^\n]{3,80})", text, re.IGNORECASE)
-    snippet = dodane.group(1) if dodane else ""
-    moment = parse_pl_datetime(snippet) if snippet else None
-    if moment:
-        moment = _plausible_posted(moment)
-    if moment:
-        has_time = bool(re.search(r"\d{1,2}:\d{2}", snippet))
-        listing.extras["posted_iso"] = moment.isoformat()
-        listing.extras["posted_has_time"] = has_time
-        listing.posted_label = format_posted_dt(moment, show_time=has_time, lang="pl")
-        if has_time:
-            return
-    elif snippet:
-        label = describe_posted(snippet)
-        if label:
-            listing.posted_label = label
-    rel = re.search(
-        r"(?:odświeżono|odswiezono\s+)?(dzisiaj|dzis|wczoraj)(?:\s+o\s+(\d{1,2}:\d{2}))?",
-        text,
-        re.IGNORECASE,
-    )
-    if not rel:
-        return
-    clock = rel.group(2)
-    moment = parse_pl_datetime(rel.group(0))
-    if moment is None:
-        return
-    moment = _plausible_posted(moment)
+    moment, has_time = parse_card_posted(text)
     if not moment:
         return
     listing.extras["posted_iso"] = moment.isoformat()
-    listing.extras["posted_has_time"] = bool(clock)
-    listing.posted_label = format_posted_dt(
-        moment, show_time=bool(clock), lang="pl"
+    listing.extras["posted_has_time"] = has_time
+    listing.posted_label = format_posted_dt(moment, show_time=has_time, lang="pl")
+
+
+def _clean_location(location: str) -> str:
+    if not location:
+        return ""
+    return _LOC_DATE_TAIL.sub("", location).strip(" -,")
+
+
+def _fill_card_facts(listing: Listing, text: str) -> None:
+    """Чинш, площа, кімнати, ціна — з тексту картки, без відкриття оголошення."""
+    blob = text or listing.raw_text or ""
+    czynsz_m = re.search(
+        r"czynsz(?:\s*administracyjny)?\s*[:\s]+([\d \u00a0]+)",
+        blob,
+        re.IGNORECASE,
     )
+    if czynsz_m and listing.czynsz_zl is None:
+        listing.czynsz_zl = _pl_int(czynsz_m.group(1)) or 0
+    area_m = re.search(r"([\d]+(?:[.,]\d+)?)\s*m(?:²|2)\b", blob, re.IGNORECASE)
+    if area_m and listing.area_m2 is None:
+        listing.area_m2 = float(area_m.group(1).replace(",", "."))
+        listing.area = f"{area_m.group(1).replace('.', ',')} m²"
+    if listing.rooms_hint is None:
+        rooms_m = re.search(r"(\d+)\s*pokoj", blob, re.IGNORECASE)
+        if rooms_m:
+            listing.rooms_hint = min(int(rooms_m.group(1)), 4)
+        else:
+            listing.rooms_hint = _infer_rooms(blob)
+    rent = _pl_int(listing.price) if listing.price else None
+    if rent is not None:
+        listing.rent_zl = rent
+    low = blob.lower()
+    if "oferta prywatna" in low or "osoba prywatna" in low:
+        listing.owner_hint = "private"
 
 
 def _enrich(listing: Listing) -> Listing:
+    listing.location = _clean_location(listing.location)
     listing.district = (
         detect_district(listing.title, listing.location, listing.raw_text[:1200])
         or listing.district
     )
     if listing.district and _NOT_DISTRICT.search(listing.district):
         listing.district = detect_district(listing.title, listing.raw_text[:1200])
+    _fill_card_facts(listing, listing.raw_text)
     listing.price_info = analyze_price(listing.price, listing.raw_text)
-    listing.owner_hint = _infer_owner(listing.raw_text)
+    if listing.owner_hint == "unknown":
+        listing.owner_hint = _infer_owner(listing.raw_text)
     listing.pets_hint = _infer_pets(listing.raw_text)
     listing.najem_hint = bool(NAJEM_RE.search(listing.raw_text))
-    listing.rooms_hint = _infer_rooms(listing.raw_text)
+    if listing.rooms_hint is None:
+        listing.rooms_hint = _infer_rooms(listing.raw_text)
+    if listing.rent_zl is None and listing.price_info and listing.price_info.base:
+        listing.rent_zl = listing.price_info.base
     return listing
 
 
 def _best_image_url(card) -> str | None:
-    """Бере найбільше фото з src/srcset (Telegram любить нормальний JPG)."""
-    img = card.locator("img").first
-    if not img.count():
-        return None
-    srcset = (
-        img.get_attribute("srcset")
-        or img.get_attribute("data-srcset")
-        or ""
-    )
-    src = (
-        img.get_attribute("src")
-        or img.get_attribute("data-src")
-        or img.get_attribute("data-original")
-        or ""
-    )
-    candidates: list[tuple[int, str]] = []
-    if srcset:
-        for part in srcset.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            bits = part.split()
-            url = bits[0]
-            width = 0
-            if len(bits) > 1 and bits[1].endswith("w"):
-                try:
-                    width = int(bits[1][:-1])
-                except ValueError:
-                    width = 0
-            candidates.append((width, url))
-    if src:
-        candidates.append((0, src))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    url = candidates[0][1]
-    if url.startswith("//"):
-        url = "https:" + url
-    url = re.sub(r";s=\d+x\d+", ";s=1200x900", url)
-    if not _is_real_photo_url(url):
-        return None
-    return url
+    photos = _photos_from_card(card)
+    return photos[0] if photos else None
+
+
+def _img_urls_from_locator(card) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    imgs = card.locator("img")
+    n = min(imgs.count(), 12)
+    for i in range(n):
+        el = imgs.nth(i)
+        srcset = el.get_attribute("srcset") or el.get_attribute("data-srcset") or ""
+        src = (
+            el.get_attribute("src")
+            or el.get_attribute("data-src")
+            or el.get_attribute("data-original")
+            or ""
+        )
+        candidates: list[tuple[int, str]] = []
+        if srcset:
+            for part in srcset.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                bits = part.split()
+                url = bits[0]
+                width = 0
+                if len(bits) > 1 and bits[1].endswith("w"):
+                    try:
+                        width = int(bits[1][:-1])
+                    except ValueError:
+                        width = 0
+                candidates.append((width, url))
+        if src:
+            candidates.append((0, src))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        url = _normalize_img_url(candidates[0][1])
+        if not _is_real_photo_url(url):
+            continue
+        key = url.split(";")[0].split("?")[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+        if len(urls) >= 4:
+            break
+    return urls
+
+
+def _photos_from_card(card) -> list[str]:
+    """Фото прямо з картки списку (після скролу lazy-img вже в DOM)."""
+    urls = _img_urls_from_locator(card)
+    if urls:
+        return urls
+    try:
+        card.scroll_into_view_if_needed(timeout=800)
+    except Exception:
+        return []
+    return _img_urls_from_locator(card)
 
 
 def _pick_listing_title(lines: list[str]) -> str:
@@ -510,6 +551,11 @@ _NON_FLAT = (
     "biuro",
     "pokój do wynajęcia",
     "pokoj do wynajecia",
+    "wynajem pokoju",
+    "pokój dla",
+    "pokoju dla",
+    "pokój na wynajem",
+    "pokoj na wynajem",
 )
 
 
@@ -581,20 +627,27 @@ def _parse_olx_card(card) -> Listing | None:
         price = ""
         price_el = card.locator('[data-testid="ad-price"]').first
         if price_el.count():
-            price = price_el.inner_text().strip()
+            price = price_el.inner_text().strip().splitlines()[0].strip()
         if not price:
             for ln in lines:
                 if "zł" in ln.lower() or "pln" in ln.lower():
-                    price = ln
+                    price = ln.splitlines()[0].strip()
                     break
 
         location = next(
-            (ln for ln in lines if "Poznań" in ln or "Poznan" in ln), ""
+            (ln for ln in lines[1:] if re.search(r"Pozna[nń]\s*,", ln)),
+            next(
+                (
+                    ln
+                    for ln in lines[1:]
+                    if "Poznań" in ln or "Poznan" in ln
+                ),
+                "",
+            ),
         )
         area = next((ln for ln in lines if "m²" in ln or "m2" in ln.lower()), "")
 
-        photo_url = _best_image_url(card)
-
+        photos = _photos_from_card(card)
         blob = f"{title}\n{text}"
         listing = Listing(
             id=f"{source}:{listing_id}",
@@ -602,9 +655,10 @@ def _parse_olx_card(card) -> Listing | None:
             price=price or "cena nieznana",
             location=location,
             area=area,
-            url=url,
+            url=url.split("?")[0],
             source=source,
-            photo_url=photo_url,
+            photo_url=photos[0] if photos else None,
+            photos=photos,
             raw_text=blob,
         )
         _stamp_posted_from_card(listing, blob)
@@ -631,16 +685,31 @@ def _parse_otodom_card(card) -> Listing | None:
         title = _pick_listing_title(lines)
 
         price = next(
-            (ln for ln in lines if "zł" in ln.lower() or "/mc" in ln.lower()),
+            (
+                ln.splitlines()[0].strip()
+                for ln in lines
+                if ("zł" in ln.lower() or "/mc" in ln.lower())
+                and "czynsz" not in ln.lower()
+            ),
             "cena nieznana",
         )
         location = next(
-            (ln for ln in lines if "Poznań" in ln or "ul." in ln.lower()), ""
+            (
+                ln
+                for ln in lines
+                if re.search(r"Pozna[nń]", ln)
+                and ("ul." in ln.lower() or "," in ln)
+                and "zł" not in ln.lower()
+            ),
+            next(
+                (ln for ln in lines if "Poznań" in ln or "Poznan" in ln),
+                "",
+            ),
         )
         area = next((ln for ln in lines if "m²" in ln or "m2" in ln.lower()), "")
 
-        photo_url = _best_image_url(card)
-
+        photos = _photos_from_card(card)
+        blob = f"{title}\n{text}"
         listing = Listing(
             id=f"otodom:{listing_id}",
             title=title[:180],
@@ -649,10 +718,11 @@ def _parse_otodom_card(card) -> Listing | None:
             area=area,
             url=url,
             source="otodom",
-            photo_url=photo_url,
-            raw_text=f"{title}\n{text}",
+            photo_url=photos[0] if photos else None,
+            photos=photos,
+            raw_text=blob,
         )
-        _stamp_posted_from_card(listing, f"{title}\n{text}")
+        _stamp_posted_from_card(listing, blob)
         return _enrich(listing)
     except Exception as exc:
         logger.debug("Otodom card parse error: %s", exc)
@@ -738,6 +808,7 @@ def fetch_olx_listings(
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         _accept_cookies(page)
         page.wait_for_selector('[data-cy="l-card"]', timeout=15000)
+        _scroll_results(page)
     except Exception:
         logger.warning("OLX fetch failed")
         return []
@@ -775,6 +846,7 @@ def fetch_otodom_listings(
         page.wait_for_selector(
             'a[href*="/pl/oferta/"], [data-cy="listing-item"]', timeout=8000
         )
+        _scroll_results(page)
     except Exception:
         logger.warning("Otodom fetch failed")
         return []
@@ -897,8 +969,32 @@ def _pl_int(text: str) -> int | None:
     return value
 
 
+def _normalize_img_url(url: str) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    url = url.replace("https://ireland.apollo.olxcdn.com:443/", "https://ireland.apollo.olxcdn.com/")
+    url = re.sub(r":443/", "/", url)
+    if url.startswith("//"):
+        url = "https:" + url
+    url = re.sub(r";s=\d+x\d+", ";s=1000x700", url)
+    url = re.sub(r";q=\d+", ";q=80", url)
+    return url
+
+
 def _upgrade_photo(url: str) -> str:
-    return re.sub(r";s=\d+x\d+", ";s=1200x900", url)
+    return _normalize_img_url(url)
+
+
+def _scroll_results(page) -> None:
+    """Підвантажити lazy-фото на сторінці результатів."""
+    try:
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(500)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
 
 
 def _is_real_photo_url(src: str) -> bool:
@@ -971,65 +1067,27 @@ def format_posted_dt(
     moment: datetime,
     display_tz: str | None = None,
     *,
-    show_time: bool = True,
+    show_time: bool = False,
     lang: str = "uk",
 ) -> str:
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=ZoneInfo("UTC"))
+        moment = moment.replace(tzinfo=WARSAW_TZ)
     zone = WARSAW_TZ if (not display_tz or lang == "pl") else ZoneInfo(display_tz)
     local = moment.astimezone(zone)
     if lang == "pl":
         line = f"Dodane {local.day} {_PL_MONTHS[local.month]} {local.year}"
-        if show_time:
+        if show_time and not (local.hour == 0 and local.minute == 0):
             line += f" o {local:%H:%M}"
         return line
     line = f"Додано {local.day} {_UK_MONTHS[local.month]} {local.year}"
-    if show_time:
+    if show_time and not (local.hour == 0 and local.minute == 0):
         line += f" о {local:%H:%M}"
     return line
 
 
 def parse_posted_from_body(text: str, now: datetime | None = None) -> tuple[datetime | None, bool]:
     """Те, що видно на OLX/Otodom: «Dodane 09 listopada 2026» або з годиною."""
-    if not text:
-        return None, False
-    now = _as_warsaw(now or datetime.now(WARSAW_TZ))
-    match = re.search(
-        r"Dodane\s+(\d{1,2})\s+([a-ząćęłńóśźż]+)"
-        r"(?:\s+(\d{4}))?(?:\s+o\s+(\d{1,2}:\d{2}))?",
-        text,
-        re.IGNORECASE,
-    )
-    if match:
-        month = _MONTHS.get(match.group(2).lower())
-        if month:
-            year = int(match.group(3)) if match.group(3) else now.year
-            clock = match.group(4)
-            try:
-                if clock:
-                    moment = _as_warsaw(
-                        datetime(
-                            year,
-                            month,
-                            int(match.group(1)),
-                            int(clock[:2]),
-                            int(clock[3:]),
-                        )
-                    )
-                    return moment, True
-                moment = _as_warsaw(datetime(year, month, int(match.group(1)), 12, 0))
-                return moment, False
-            except ValueError:
-                pass
-    snippet = ""
-    head = re.search(r"Dodane\s+([^\n]{3,80})", text, re.IGNORECASE)
-    if head:
-        snippet = head.group(1)
-    moment = parse_pl_datetime(snippet or text, now=now)
-    if moment is None:
-        return None, False
-    has_time = bool(re.search(r"\d{1,2}:\d{2}", snippet or text))
-    return moment, has_time
+    return parse_card_posted(text, now=now)
 
 
 def parse_posted_from_html(html: str) -> datetime | None:
@@ -1051,32 +1109,10 @@ def parse_posted_from_html(html: str) -> datetime | None:
 
 def describe_posted(text: str, *, now: datetime | None = None) -> str:
     """Людська дата публікації з тексту картки або сторінки."""
-    if not text:
-        return ""
-    now = now or datetime.now(WARSAW_TZ)
-    low = text.lower()
-    time_m = re.search(r"(?:\bo\s+|,\s*)(\d{1,2}:\d{2})", text, re.IGNORECASE)
-    clock = time_m.group(1) if time_m else ""
-    if any(word in low for word in ("dzisiaj", "dzis", "сьогодні")):
-        return format_posted_dt(now.replace(hour=int(clock[:2]) if clock else 12, minute=int(clock[3:]) if clock else 0))
-    if "wczoraj" in low or "вчора" in low:
-        day = now - timedelta(days=1)
-        if clock:
-            return format_posted_dt(
-                day.replace(hour=int(clock[:2]), minute=int(clock[3:]), second=0, microsecond=0)
-            )
-        return format_posted_dt(day)
-    moment = parse_pl_datetime(text, now=now)
+    moment, has_time = parse_card_posted(text, now=now)
     if moment is None:
         return ""
-    if clock:
-        try:
-            moment = moment.replace(hour=int(clock[:2]), minute=int(clock[3:]), second=0, microsecond=0)
-        except ValueError:
-            pass
-    if moment.year < 2000:
-        moment = moment.replace(year=now.year)
-    return format_posted_dt(moment)
+    return format_posted_dt(moment, show_time=has_time)
 
 
 _STREET_PREFIX = {
@@ -1178,32 +1214,124 @@ def _plausible_posted(
     return moment
 
 
+_MONTH_ALT = (
+    "stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|"
+    "września|wrzesnia|października|pazdziernika|listopada|grudnia"
+)
+
+
+def _abs_from_match(
+    day_s: str,
+    month_s: str,
+    year_s: str | None,
+    clock: str | None,
+    now: datetime,
+) -> tuple[datetime | None, bool]:
+    month = _MONTHS.get(month_s.lower())
+    if not month:
+        return None, False
+    year = int(year_s) if year_s else now.year
+    try:
+        if clock:
+            moment = _as_warsaw(
+                datetime(year, month, int(day_s), int(clock[:2]), int(clock[3:]))
+            )
+            return _plausible_posted(moment, now), True
+        moment = _as_warsaw(datetime(year, month, int(day_s), 12, 0))
+        return _plausible_posted(moment, now), False
+    except ValueError:
+        return None, False
+
+
+def _rel_word(word: str, clock: str | None, now: datetime) -> tuple[datetime | None, bool]:
+    low = word.lower()
+    base = now
+    if low in {"wczoraj", "вчора"}:
+        base = now - timedelta(days=1)
+    if clock:
+        try:
+            moment = base.replace(
+                hour=int(clock[:2]),
+                minute=int(clock[3:]),
+                second=0,
+                microsecond=0,
+            )
+            return moment, True
+        except ValueError:
+            pass
+    moment = base.replace(hour=12, minute=0, second=0, microsecond=0)
+    return moment, False
+
+
+def parse_card_posted(
+    text: str, now: datetime | None = None
+) -> tuple[datetime | None, bool]:
+    """Дата з картки OLX/Otodom. has_time=True лише якщо була година."""
+    if not text:
+        return None, False
+    now = _as_warsaw(now or datetime.now(WARSAW_TZ))
+
+    m = re.search(
+        rf"(?:odświeżono|odswiezono)\s+dnia\s+(\d{{1,2}})\s+({_MONTH_ALT})(?:\s+(\d{{4}}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return _abs_from_match(m.group(1), m.group(2), m.group(3), None, now)
+
+    m = re.search(
+        rf"Dodane\s+(\d{{1,2}})\s+({_MONTH_ALT})(?:\s+(\d{{4}}))?(?:\s+o\s+(\d{{1,2}}:\d{{2}}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return _abs_from_match(m.group(1), m.group(2), m.group(3), m.group(4), now)
+
+    m = re.search(
+        r"Dodane\s+(dzisiaj|dzis|wczoraj)(?:\s+o\s+(\d{1,2}:\d{2}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return _rel_word(m.group(1), m.group(2), now)
+
+    m = re.search(
+        rf"[-–]\s+(\d{{1,2}})\s+({_MONTH_ALT})(?:\s+(\d{{4}}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return _abs_from_match(m.group(1), m.group(2), m.group(3), None, now)
+
+    m = re.search(
+        r"(\d+)\s*(minut[aęy]?|min\.?|godzin[aęy]?|godz\.?|dni|dzień|dzien)\s*temu",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith("min"):
+            return now - timedelta(minutes=n), True
+        if unit.startswith("godz"):
+            return now - timedelta(hours=n), True
+        day = (now - timedelta(days=n)).replace(hour=12, minute=0, second=0, microsecond=0)
+        return day, False
+
+    m = re.search(
+        r"(?:^|\n)\s*(dzisiaj|dzis|wczoraj)(?:\s+o\s+(\d{1,2}:\d{2}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return _rel_word(m.group(1), m.group(2), now)
+
+    return None, False
+
+
 def parse_pl_datetime(text: str, now: datetime | None = None) -> datetime | None:
     """Дата з польського тексту картки або сторінки оголошення."""
-    if not text:
-        return None
-    now = _as_warsaw(now or datetime.now(WARSAW_TZ))
-    low = text.lower()
-    if "dzisiaj" in low or "dzis" in low or "сьогодні" in low:
-        return now
-    if "wczoraj" in low or "вчора" in low:
-        return now - timedelta(days=1)
-    match = re.search(
-        r"(\d{1,2})\s+([a-ząćęłńóśźż]+)(?:\s+(\d{4}))?",
-        low,
-    )
-    if not match:
-        return None
-    month = _MONTHS.get(match.group(2))
-    if not month:
-        return None
-    year = int(match.group(3)) if match.group(3) else now.year
-    try:
-        moment = _as_warsaw(datetime(year, month, int(match.group(1))))
-    except ValueError:
-        return None
-    if not match.group(3):
-        return _plausible_posted(moment, now)
+    moment, _has_time = parse_card_posted(text, now=now)
     return moment
 
 
@@ -1222,11 +1350,9 @@ def listing_posted_at(listing: Listing) -> datetime | None:
         moment = parse_pl_datetime(listing.posted_label)
         if moment:
             return _plausible_posted(moment)
-    dodane = re.search(r"Dodane\s+([^\n]{3,80})", listing.raw_text, re.IGNORECASE)
-    if dodane:
-        moment = parse_pl_datetime(dodane.group(1))
-        if moment:
-            return _plausible_posted(moment)
+    moment, _has_time = parse_card_posted(listing.raw_text or listing.location)
+    if moment:
+        return _plausible_posted(moment)
     return None
 
 
@@ -1400,7 +1526,20 @@ def _read_photos(page) -> list[str]:
     return photos
 
 
+def _ensure_playwright_browsers() -> None:
+    import os
+    from pathlib import Path
+
+    current = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if current and Path(current).exists():
+        return
+    local = Path.home() / "AppData" / "Local" / "ms-playwright"
+    if local.exists():
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(local)
+
+
 def _open_browser():
+    _ensure_playwright_browsers()
     playwright = sync_playwright().start()
     browser = playwright.chromium.launch(headless=True)
     context = browser.new_context(
@@ -1430,12 +1569,15 @@ def enrich_on_page(page, listing: Listing) -> Listing:
         if has_time and visible_dt:
             posted_dt = visible_dt
             listing.extras["posted_has_time"] = True
-        elif json_dt:
-            posted_dt = json_dt
-            listing.extras["posted_has_time"] = True
         elif visible_dt:
             posted_dt = visible_dt
             listing.extras["posted_has_time"] = False
+        elif json_dt:
+            posted_dt = json_dt
+            jlocal = _as_warsaw(json_dt)
+            listing.extras["posted_has_time"] = not (
+                jlocal.hour == 0 and jlocal.minute == 0
+            )
         else:
             posted_dt = None
             listing.extras["posted_has_time"] = False
@@ -1483,16 +1625,22 @@ def load_listing_details(listing: Listing) -> Listing:
 
 def _dedupe(items: list[Listing], limit: int | None = None) -> list[Listing]:
     unique: list[Listing] = []
-    seen_ids: set[str] = set()
-    fingerprints: set[str] = set()
+    seen_ids: dict[str, int] = {}
+    fingerprints: dict[str, int] = {}
     for item in items:
-        if item.id in seen_ids:
-            continue
         fp = re.sub(r"\W+", "", f"{item.title}{item.price}".lower())[:60]
-        if fp in fingerprints:
+        idx = seen_ids.get(item.id)
+        if idx is None:
+            idx = fingerprints.get(fp)
+        if idx is not None:
+            prev = unique[idx]
+            if len(item.photos) > len(prev.photos):
+                unique[idx] = item
+                seen_ids[item.id] = idx
+                fingerprints[fp] = idx
             continue
-        seen_ids.add(item.id)
-        fingerprints.add(fp)
+        seen_ids[item.id] = len(unique)
+        fingerprints[fp] = len(unique)
         unique.append(item)
         if limit and len(unique) >= limit:
             break

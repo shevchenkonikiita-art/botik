@@ -82,9 +82,9 @@ async def _edit(update: Update, text: str, reply_markup=None) -> None:
 
 
 def _keep_if_not_old(item: Listing, days: int = 7) -> bool:
-    """Сторінка «найновіші»: без дати лишаємо, з датою — лише якщо не старіша за days."""
+    """Лише оголошення з датою в межах `days`. Старі промо без свіжої дати — геть."""
     if listing_posted_at(item) is None:
-        return True
+        return False
     return listing_posted_within(item, days)
 
 
@@ -303,8 +303,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_message(
             chat_id=user_id,
             text=(
-                "📅 Збираю всі оголошення за 7 днів з OLX і Otodom.\n"
-                "Надішлю від найстарших до найновіших, з фото і датою як на сайті (час Польщі)."
+                "📅 Збираю оголошення за останні 7 днів з OLX і Otodom.\n"
+                "Надішлю від найстарших до найновіших, з фото і датою як на сайті."
             ),
         )
         user_first_on()

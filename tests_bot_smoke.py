@@ -10,8 +10,70 @@ from filters_util import merge_filters_for_watch
 from handlers.keyboards import main_menu_keyboard, quiet_keyboard, timezone_keyboard
 from handlers.texts import home_text, welcome_text
 from notify_util import in_quiet_hours
-from scraper import listing_from_snapshot, listing_matches_user, listing_snapshot
+from scraper import (
+    Listing,
+    _clean_location,
+    _stamp_posted_from_card,
+    format_posted_dt,
+    listing_from_snapshot,
+    listing_matches_user,
+    listing_posted_within,
+    listing_snapshot,
+    parse_card_posted,
+)
 from watch_browser import watch_fetch_listings
+
+
+def test_card_dates() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = datetime(2026, 11, 9, 18, 0, tzinfo=ZoneInfo("Europe/Warsaw"))
+
+    moment, has_time = parse_card_posted(
+        "Poznań, Grunwald - 11 października 2026", now=now
+    )
+    assert moment is not None
+    assert moment.day == 11 and moment.month == 10
+    assert has_time is False
+    assert "00:00" not in format_posted_dt(moment, show_time=has_time)
+
+    moment, has_time = parse_card_posted(
+        "Poznań, Łacina - Odświeżono dnia 02 listopada 2026", now=now
+    )
+    assert moment is not None and moment.day == 2 and moment.month == 11
+    assert has_time is False
+
+    moment, has_time = parse_card_posted("Dodane wczoraj\n3000 zł", now=now)
+    assert moment is not None and moment.day == 8
+    assert has_time is False
+
+    fresh = Listing(
+        id="olx:fresh",
+        title="2 pokoje",
+        price="2400 zł",
+        location="Poznań, Stare Miasto - 09 listopada 2026",
+        area="48 m²",
+        url="https://www.olx.pl/d/oferta/x",
+        raw_text="2 pokoje\n2400 zł\nPoznań, Stare Miasto - 09 listopada 2026",
+    )
+    _stamp_posted_from_card(fresh, fresh.raw_text)
+    assert listing_posted_within(fresh, 7)
+    assert "00:00" not in (fresh.posted_label or "")
+    assert "00:00" not in fresh.format_caption()
+
+    old = Listing(
+        id="olx:old",
+        title="stare",
+        price="2800 zł",
+        location="Poznań, Grunwald - 11 października 2026",
+        area="55 m²",
+        url="https://www.olx.pl/d/oferta/y",
+        raw_text="stare\n2800 zł\nPoznań, Grunwald - 11 października 2026",
+    )
+    _stamp_posted_from_card(old, old.raw_text)
+    assert not listing_posted_within(old, 7)
+    assert _clean_location(old.location) == "Poznań, Grunwald"
 
 
 def test_imports_and_keyboards() -> None:
@@ -58,6 +120,7 @@ def test_quiet_hours_toggle() -> None:
 
 
 def main() -> int:
+    test_card_dates()
     test_imports_and_keyboards()
     test_watch_pipeline()
     test_snapshot_roundtrip()
