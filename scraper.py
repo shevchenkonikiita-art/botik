@@ -137,7 +137,7 @@ class Listing:
             furn = ""
         who = f"👤 {owner}" + (f" · {furn}" if furn else "")
 
-        show_time = bool(self.extras.get("posted_has_time", True))
+        show_time = bool(self.extras.get("posted_has_time"))
         if self.extras.get("posted_iso"):
             try:
                 posted = format_posted_dt(
@@ -336,25 +336,35 @@ def _stamp_posted_from_card(listing: Listing, text: str) -> None:
     if moment:
         moment = _plausible_posted(moment)
     if moment:
+        has_time = bool(re.search(r"\d{1,2}:\d{2}", snippet))
         listing.extras["posted_iso"] = moment.isoformat()
-        listing.posted_label = format_posted_dt(moment)
+        listing.extras["posted_has_time"] = has_time
+        listing.posted_label = format_posted_dt(moment, show_time=has_time, lang="pl")
+        if has_time:
+            return
     elif snippet:
         label = describe_posted(snippet)
         if label:
             listing.posted_label = label
-    if listing.extras.get("posted_iso"):
-        return
     rel = re.search(
-        r"(?:odświeżono|odswiezono\s+)?(dzisiaj|dzis|wczoraj)(?:\s+o\s+\d{1,2}:\d{2})?",
+        r"(?:odświeżono|odswiezono\s+)?(dzisiaj|dzis|wczoraj)(?:\s+o\s+(\d{1,2}:\d{2}))?",
         text,
         re.IGNORECASE,
     )
     if not rel:
         return
-    moment = _plausible_posted(parse_pl_datetime(rel.group(0)) or datetime.now(WARSAW_TZ))
-    if moment:
-        listing.extras["posted_iso"] = moment.isoformat()
-        listing.posted_label = format_posted_dt(moment)
+    clock = rel.group(2)
+    moment = parse_pl_datetime(rel.group(0))
+    if moment is None:
+        return
+    moment = _plausible_posted(moment)
+    if not moment:
+        return
+    listing.extras["posted_iso"] = moment.isoformat()
+    listing.extras["posted_has_time"] = bool(clock)
+    listing.posted_label = format_posted_dt(
+        moment, show_time=bool(clock), lang="pl"
+    )
 
 
 def _enrich(listing: Listing) -> Listing:
@@ -377,8 +387,17 @@ def _best_image_url(card) -> str | None:
     img = card.locator("img").first
     if not img.count():
         return None
-    srcset = img.get_attribute("srcset") or ""
-    src = img.get_attribute("src") or ""
+    srcset = (
+        img.get_attribute("srcset")
+        or img.get_attribute("data-srcset")
+        or ""
+    )
+    src = (
+        img.get_attribute("src")
+        or img.get_attribute("data-src")
+        or img.get_attribute("data-original")
+        or ""
+    )
     candidates: list[tuple[int, str]] = []
     if srcset:
         for part in srcset.split(","):
@@ -400,8 +419,11 @@ def _best_image_url(card) -> str | None:
         return None
     candidates.sort(key=lambda x: x[0], reverse=True)
     url = candidates[0][1]
-    # OLX часто дає ;s=216x152 — підміняємо на більше
-    url = re.sub(r";s=\d+x\d+", ";s=1000x700", url)
+    if url.startswith("//"):
+        url = "https:" + url
+    url = re.sub(r";s=\d+x\d+", ";s=1200x900", url)
+    if not _is_real_photo_url(url):
+        return None
     return url
 
 
@@ -880,12 +902,38 @@ def _upgrade_photo(url: str) -> str:
 
 
 def _is_real_photo_url(src: str) -> bool:
+    if not src or src.startswith("data:"):
+        return False
     low = src.lower()
+    if src.startswith("//"):
+        src = "https:" + src
+        low = src.lower()
     if not src.startswith("http"):
         return False
-    if any(bad in low for bad in (".svg", "logo", "/icon", "sprite", "placeholder", "avatar")):
+    if any(
+        bad in low
+        for bad in (
+            ".svg",
+            "logo",
+            "/icon",
+            "sprite",
+            "placeholder",
+            "avatar",
+            "blank.gif",
+        )
+    ):
         return False
-    return "olxcdn.com" in low or "apollo.olxcdn" in low
+    return any(
+        host in low
+        for host in (
+            "olxcdn.com",
+            "apollo.olxcdn",
+            "img.otodom.pl",
+            "images.otodom.pl",
+            "otodom.pl/image",
+            "ocdn.eu",
+        )
+    )
 
 
 _UK_MONTHS = {
@@ -1301,13 +1349,13 @@ def _photos_from_html(html: str) -> list[str]:
     photos: list[str] = []
     seen: set[str] = set()
     for match in re.finditer(
-        r"https://[^\"'\s]+apollo\.olxcdn\.com[^\"'\s]+/image[^\"'\s]*",
+        r"https://[^\"'\s]+(?:apollo\.olxcdn\.com|img\.otodom\.pl|images\.otodom\.pl|ocdn\.eu)[^\"'\s]+",
         html,
     ):
-        src = match.group(0).replace("\\u002F", "/")
+        src = match.group(0).replace("\\u002F", "/").rstrip("\\")
         if not _is_real_photo_url(src):
             continue
-        key = src.split(";")[0]
+        key = src.split(";")[0].split("?")[0]
         if key in seen:
             continue
         seen.add(key)
@@ -1315,9 +1363,14 @@ def _photos_from_html(html: str) -> list[str]:
         if len(photos) >= 4:
             break
     if not photos:
-        og = re.search(r'property="og:image" content="([^"]+)"', html)
-        if og and _is_real_photo_url(og.group(1)):
-            photos.append(_upgrade_photo(og.group(1)))
+        og = re.search(
+            r'property="og:image"\s+content="([^"]+)"',
+            html,
+        ) or re.search(r'content="([^"]+)"\s+property="og:image"', html)
+        if og:
+            src = og.group(1)
+            if _is_real_photo_url(src) or src.startswith("http"):
+                photos.append(_upgrade_photo(src))
     return photos
 
 
@@ -1326,7 +1379,15 @@ def _read_photos(page) -> list[str]:
     seen: set[str] = set()
     imgs = page.locator("img")
     for i in range(min(imgs.count(), 40)):
-        src = imgs.nth(i).get_attribute("src") or ""
+        el = imgs.nth(i)
+        src = (
+            el.get_attribute("src")
+            or el.get_attribute("data-src")
+            or el.get_attribute("data-original")
+            or ""
+        )
+        if src.startswith("//"):
+            src = "https:" + src
         if not _is_real_photo_url(src):
             continue
         key = src.split(";")[0]
@@ -1365,16 +1426,20 @@ def enrich_on_page(page, listing: Listing) -> Listing:
         html = page.content()
         text = page.inner_text("body")
         visible_dt, has_time = parse_posted_from_body(text)
-        posted_dt = visible_dt or parse_posted_from_html(html)
-        if has_time or visible_dt:
-            listing.extras["posted_has_time"] = has_time
-        elif parse_posted_from_html(html):
+        json_dt = parse_posted_from_html(html)
+        if has_time and visible_dt:
+            posted_dt = visible_dt
             listing.extras["posted_has_time"] = True
+        elif json_dt:
+            posted_dt = json_dt
+            listing.extras["posted_has_time"] = True
+        elif visible_dt:
+            posted_dt = visible_dt
+            listing.extras["posted_has_time"] = False
         else:
+            posted_dt = None
             listing.extras["posted_has_time"] = False
         if posted_dt:
-            if visible_dt:
-                posted_dt = visible_dt
             posted_dt = _plausible_posted(_as_warsaw(posted_dt))
             if posted_dt:
                 listing.extras["posted_iso"] = posted_dt.isoformat()

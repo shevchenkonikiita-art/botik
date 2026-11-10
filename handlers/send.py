@@ -91,9 +91,10 @@ async def send_listing(
 ) -> None:
     display_tz = display_tz or db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
     markup = listing_keyboard(item.url, item.maps_url())
-    urls = [u for u in (item.photos or []) if u]
-    if item.photo_url and item.photo_url not in urls:
-        urls.insert(0, item.photo_url)
+    urls = [u for u in (item.photos or []) if u and str(u).startswith("http")]
+    if item.photo_url and str(item.photo_url).startswith("http"):
+        if item.photo_url not in urls:
+            urls.insert(0, item.photo_url)
 
     headers = _photo_headers(item)
     files: list[BytesIO] = []
@@ -101,6 +102,14 @@ async def send_listing(
         async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
             for url in urls[:4]:
                 photo = await _download_photo(client, url, headers)
+                if photo is None:
+                    alt = dict(headers)
+                    alt["Referer"] = (
+                        "https://www.otodom.pl/"
+                        if "olx.pl" in headers.get("Referer", "")
+                        else "https://www.olx.pl/"
+                    )
+                    photo = await _download_photo(client, url, alt)
                 if photo is not None:
                     files.append(photo)
 
