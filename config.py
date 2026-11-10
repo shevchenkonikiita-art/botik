@@ -75,10 +75,10 @@ SOURCES = ("olx", "otodom", "facebook")
 # 1 с неможливо — один прохід браузером ~20–40 с; мінімум 10 с (через .env).
 # Приклад у .env: CHECK_INTERVAL=15
 # Warsaw Rent ≈ 1 хв; у .env можна 10–15 для агресивнішого режиму.
-CHECK_INTERVAL = max(10, int(os.getenv("CHECK_INTERVAL", "25")))
+CHECK_INTERVAL = max(10, int(os.getenv("CHECK_INTERVAL", "20")))
 
-# Миттєві сповіщення: лише те, що виклали за останні N днів (старе — кнопка «За 7 днів»).
-NEW_LISTING_MAX_AGE_DAYS = max(1, int(os.getenv("NEW_LISTING_MAX_AGE_DAYS", "2")))
+# Миттєві сповіщення: сьогодні / останні N діб. Старіше — кнопка «За 7 днів».
+NEW_LISTING_MAX_AGE_DAYS = max(1, int(os.getenv("NEW_LISTING_MAX_AGE_DAYS", "1")))
 
 # Скільки карток читаємо з кожної сторінки LATEST (watch не обрізає раніше за ліміт).
 WATCH_MAX_CARD_SCAN = max(24, int(os.getenv("WATCH_MAX_CARD_SCAN", "56")))

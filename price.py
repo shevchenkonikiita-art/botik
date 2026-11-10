@@ -167,16 +167,7 @@ def analyze_price(listed_price_text: str, description: str = "") -> PriceBreakdo
         if media == 0 and mentions_media:
             media = DEFAULT_MEDIA_WHEN_MENTIONED
             estimated = True
-        if (
-            base is not None
-            and czynsz == 0
-            and media == 0
-            and not inclusive
-            and not mentions_czynsz
-            and not mentions_media
-        ):
-            media = DEFAULT_EXTRA_WHEN_UNKNOWN
-            estimated = True
+        # Бюджет = оренда + чинш. Не додаємо вигадані 600 zł «media».
 
     if base is None:
         return PriceBreakdown(

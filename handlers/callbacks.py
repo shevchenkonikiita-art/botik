@@ -400,7 +400,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "flt:budget":
         await _edit(
             update,
-            "💰 Бюджет = оренда + чинш + оплати на місяць.\n"
+            "💰 Бюджет = оренда + чинш на місяць "
+            "(як 3100 + czynsz 850 = 3950).\n"
             "Обери діапазон або введи вручну (напр. 2000-3500):",
             budget_settings_keyboard(filters),
         )

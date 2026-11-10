@@ -15,6 +15,7 @@ from scraper import (
     _clean_location,
     _stamp_posted_from_card,
     format_posted_dt,
+    is_fresh_for_watch,
     listing_from_snapshot,
     listing_matches_user,
     listing_posted_within,
@@ -76,6 +77,51 @@ def test_card_dates() -> None:
     assert _clean_location(old.location) == "Poznań, Grunwald"
 
 
+def test_budget_rent_plus_czynsz() -> None:
+    item = Listing(
+        id="otodom:demo",
+        title="Apartament 47m, Grunwald, Ptasia 20, nowe, garaż",
+        price="3100 zł",
+        location="Grunwald, Poznań",
+        area="47 m²",
+        url="https://www.otodom.pl/pl/oferta/x",
+        rent_zl=3100,
+        czynsz_zl=850,
+        area_m2=47.0,
+        rooms_hint=2,
+        owner_hint="private",
+        furnished="tak",
+        district="Grunwald",
+    )
+    cap = item.format_caption()
+    assert "3 100 zł + czynsz 850 = 3 950 zł" in cap
+    assert "≈ 84 zł/m²" in cap
+    tight = {**DEFAULT_FILTERS, "max_price": 3100, "setup_done": True}
+    ok = {**DEFAULT_FILTERS, "min_price": 3500, "max_price": 5000, "setup_done": True}
+    assert not listing_matches_user(item, tight)
+    assert listing_matches_user(item, ok)
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Europe/Warsaw"))
+    posted = now.replace(second=0, microsecond=0) - timedelta(minutes=20)
+    today = Listing(
+        id="olx:today",
+        title="nowe mieszkanie",
+        price="2000 zł",
+        location="Poznań, Wilda",
+        area="30 m²",
+        url="https://www.olx.pl/x",
+        raw_text="Dodane dzisiaj",
+        extras={
+            "posted_iso": posted.isoformat(),
+            "posted_has_time": True,
+        },
+    )
+    assert is_fresh_for_watch(today, 1)
+    assert f"Додано о {posted:%H:%M}" in today.format_caption()
+
+
 def test_imports_and_keyboards() -> None:
     db.init_db()
     f = {**DEFAULT_FILTERS, "setup_done": True}
@@ -121,6 +167,7 @@ def test_quiet_hours_toggle() -> None:
 
 def main() -> int:
     test_card_dates()
+    test_budget_rent_plus_czynsz()
     test_imports_and_keyboards()
     test_watch_pipeline()
     test_snapshot_roundtrip()

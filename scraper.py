@@ -106,17 +106,15 @@ class Listing:
             self.title, self.location, self.district, self.raw_text[:800]
         )
         maps = self.maps_url()
-        rent = self.rent_zl
-        czynsz = self.czynsz_zl if self.czynsz_zl is not None else 0
-        if rent is None and self.price_info and self.price_info.base:
-            rent = self.price_info.base
+        rent, czynsz = listing_rent_czynsz(self)
         if rent is None:
             price_line = "💰 ціна не вказана"
             total = None
         else:
-            total = rent + (czynsz or 0)
+            total = rent + czynsz
+            # Як у Warsaw Rent: 3 100 zł + czynsz 850 = 3 950 zł · ≈ 84 zł/m²
             price_line = (
-                f"💰 {self._money(rent)} zł + czynsz {self._money(czynsz)} zł "
+                f"💰 {self._money(rent)} zł + czynsz {self._money(czynsz)} "
                 f"= {self._money(total)} zł"
             )
             if self.area_m2 and self.area_m2 > 0 and total:
@@ -531,12 +529,40 @@ def _matches_rooms(listing: Listing, rooms: list[int]) -> bool:
     return listing.rooms_hint in rooms
 
 
+def listing_rent_czynsz(listing: Listing) -> tuple[int | None, int]:
+    """Оренда і чинш для картки та бюджету (без вигаданих media)."""
+    rent = listing.rent_zl
+    if rent is None and listing.price_info and listing.price_info.base:
+        rent = listing.price_info.base
+    if rent is None:
+        from price import parse_amount
+
+        rent = parse_amount(listing.price)
+    czynsz = listing.czynsz_zl
+    if czynsz is None and listing.price_info and not listing.price_info.estimated:
+        czynsz = listing.price_info.czynsz
+    return rent, int(czynsz or 0)
+
+
+def listing_total_zl(listing: Listing) -> int | None:
+    rent, czynsz = listing_rent_czynsz(listing)
+    if rent is None:
+        return None
+    return rent + czynsz
+
+
 def _matches_budget(listing: Listing, filters: dict[str, Any]) -> bool:
+    """Фільтр бюджету = оренда + чинш, як на картці Warsaw Rent."""
     min_price = int(filters.get("min_price") or 0)
     max_price = int(filters.get("max_price") or 99999)
-    info = listing.price_info or analyze_price(listing.price, listing.raw_text)
-    listing.price_info = info
-    return fits_budget(info, min_price, max_price)
+    total = listing_total_zl(listing)
+    if total is None:
+        return True
+    if min_price > 0 and total < min_price:
+        return False
+    if max_price < 90000 and total > max_price:
+        return False
+    return True
 
 
 _NON_FLAT = (
@@ -563,7 +589,7 @@ def _is_apartment(listing: Listing) -> bool:
     blob = f"{listing.title}\n{listing.raw_text}".lower()
     if any(x in blob for x in _NON_FLAT):
         # виняток: якщо явно mieszkanie
-        if "mieszkanie" in blob or "kawalerka" in blob:
+        if "mieszkanie" in blob or "kawalerka" in blob or "apartament" in blob:
             return True
         return False
     return True
@@ -1074,13 +1100,19 @@ def format_posted_dt(
         moment = moment.replace(tzinfo=WARSAW_TZ)
     zone = WARSAW_TZ if (not display_tz or lang == "pl") else ZoneInfo(display_tz)
     local = moment.astimezone(zone)
+    today = datetime.now(zone).date()
+    clock = show_time and not (local.hour == 0 and local.minute == 0)
     if lang == "pl":
+        if clock and local.date() == today:
+            return f"Dodane o {local:%H:%M}"
         line = f"Dodane {local.day} {_PL_MONTHS[local.month]} {local.year}"
-        if show_time and not (local.hour == 0 and local.minute == 0):
+        if clock:
             line += f" o {local:%H:%M}"
         return line
+    if clock and local.date() == today:
+        return f"Додано о {local:%H:%M}"
     line = f"Додано {local.day} {_UK_MONTHS[local.month]} {local.year}"
-    if show_time and not (local.hour == 0 and local.minute == 0):
+    if clock:
         line += f" о {local:%H:%M}"
     return line
 
@@ -1376,15 +1408,18 @@ def is_within_days(listing: Listing, days: int = 7, *, strict: bool = False) -> 
 
 
 def is_fresh_for_watch(listing: Listing, days: int) -> bool:
-    """Миттєве сповіщення: нове id зі стрічки «найновіші».
+    """Миттєве сповіщення: щойно з’явилось у «найновіші» сьогодні.
 
-    Відома стара дата — не шлемо (це кнопка «За 7 днів»).
-    Дати немає — оголошення щойно з’явилось у верху стрічки, шлемо.
+    Дати немає — верх стрічки LATEST, шлемо.
+    Є дата — лише сьогодні / останні `days` доби. Старе — кнопка «За 7 днів».
     """
     moment = listing_posted_at(listing)
     if moment is None:
         return True
-    return listing_posted_within(listing, days)
+    now = datetime.now(WARSAW_TZ)
+    if moment.astimezone(WARSAW_TZ).date() == now.date():
+        return True
+    return listing_posted_within(listing, max(1, days))
 
 
 def _apply_detail_text(listing: Listing, blob: str) -> None:

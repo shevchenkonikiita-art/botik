@@ -37,7 +37,7 @@ from scraper import (
     listing_record,
     listing_snapshot,
 )
-from watch_browser import watch_fetch_listings
+from watch_browser import watch_enrich_many, watch_fetch_listings
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -132,30 +132,36 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         for x in unseen
         if any(watch_might_match_user(x, user_filters[uid]) for uid in ready)
     ]
-    to_send = matched[:8]
-    drop_ids = [x.id for x in unseen if x not in matched]
-    leftover = [x.id for x in matched[8:]]
-    brand_new = [
+    stale_ids = [x.id for x in unseen if x not in matched]
+    fresh = [
         x
-        for x in to_send
+        for x in matched
         if is_fresh_for_watch(x, NEW_LISTING_MAX_AGE_DAYS)
     ]
-    brand_new.sort(
-        key=lambda x: listing_posted_at(x)
-        or datetime.now(timezone.utc),
-        reverse=True,
-    )
-    db.mark_seen_many(drop_ids + [x.id for x in to_send])
+    old_on_feed = [x.id for x in matched if x not in fresh]
+    db.mark_seen_many(stale_ids + old_on_feed)
+
+    brand_new = fresh[:8]
+    leftover = fresh[8:]
     if leftover:
         logger.info("watch leftover %s for next cycle", len(leftover))
-
     if not brand_new:
         return
 
+    try:
+        brand_new = await run_browser(watch_enrich_many, brand_new)
+    except Exception:
+        logger.exception("watch enrich failed; sending card data")
+
+    brand_new.sort(
+        key=lambda x: listing_posted_at(x) or datetime.now(timezone.utc),
+        reverse=True,
+    )
+    db.mark_seen_many([x.id for x in brand_new])
+
     logger.info(
-        "Notify: %s fresh (≤%s days or date unknown)",
+        "Notify: %s new today/latest (enrich czynsz+photo)",
         len(brand_new),
-        NEW_LISTING_MAX_AGE_DAYS,
     )
     for user_id in ready:
         user_f = user_filters[user_id]

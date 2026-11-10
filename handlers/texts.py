@@ -34,7 +34,7 @@ def _rooms_label(rooms: list[int] | None) -> str:
 def _budget_label(filters: dict[str, Any]) -> str:
     mn = int(filters.get("min_price") or 0)
     mx = int(filters.get("max_price") or 0)
-    suffix = " (з чиншем і оплатами)"
+    suffix = " (оренда + чинш)"
     if mn <= 0 and mx >= 90000:
         return "не важливо"
     if mn <= 0:
@@ -102,10 +102,9 @@ def filters_menu_text(filters: dict[str, Any]) -> str:
 def wizard_budget_text() -> str:
     return (
         "Крок 1 з 3 · 💰 Бюджет\n\n"
-        "Скільки готові платити НА МІСЯЦЬ ЗАВРАЗОМ — "
-        "оренда + чинш + media/оплати?\n\n"
-        "Приклад: якщо пишете 3500 — покажу лише квартири, "
-        "де повна сума ≈ до 3500 zł.\n"
+        "Скільки готові платити НА МІСЯЦЬ ЗАВРАЗОМ — оренда + чинш.\n\n"
+        "Приклад як у Warsaw Rent: 3100 + чинш 850 = 3950 zł. "
+        "Якщо бюджет до 3100 — ця квартира не пройде.\n"
         "Оберіть діапазон або напишіть свій: 2000-3500."
     )
 
