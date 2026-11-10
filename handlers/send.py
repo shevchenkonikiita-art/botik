@@ -86,8 +86,10 @@ async def send_listing(
     item: Listing,
     *,
     prefix: str = "",
+    display_tz: str | None = None,
+    date_lang: str = "uk",
 ) -> None:
-    display_tz = db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
+    display_tz = display_tz or db.get_filters(chat_id).get("display_tz") or DISPLAY_TZ
     markup = listing_keyboard(item.url, item.maps_url())
     urls = [u for u in (item.photos or []) if u]
     if item.photo_url and item.photo_url not in urls:
@@ -105,9 +107,16 @@ async def send_listing(
     # Альбом у Telegram не підтримує inline-кнопки — лінки в підписі.
     use_album = len(files) >= 2
     caption = (
-        (prefix + item.format_caption(embed_links=use_album, display_tz=display_tz))
+        (
+            prefix
+            + item.format_caption(
+                embed_links=use_album, display_tz=display_tz, date_lang=date_lang
+            )
+        )
         if prefix
-        else item.format_caption(embed_links=use_album, display_tz=display_tz)
+        else item.format_caption(
+            embed_links=use_album, display_tz=display_tz, date_lang=date_lang
+        )
     )[:1024]
 
     if use_album:
@@ -130,9 +139,16 @@ async def send_listing(
             logger.exception("media group failed for %s", item.id)
 
     caption = (
-        (prefix + item.format_caption(embed_links=False, display_tz=display_tz))
+        (
+            prefix
+            + item.format_caption(
+                embed_links=False, display_tz=display_tz, date_lang=date_lang
+            )
+        )
         if prefix
-        else item.format_caption(embed_links=False, display_tz=display_tz)
+        else item.format_caption(
+            embed_links=False, display_tz=display_tz, date_lang=date_lang
+        )
     )[:1024]
 
     if files:

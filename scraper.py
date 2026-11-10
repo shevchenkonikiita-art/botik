@@ -84,7 +84,13 @@ class Listing:
     def _money(self, value: int) -> str:
         return f"{value:,}".replace(",", " ")
 
-    def format_caption(self, *, embed_links: bool = False, display_tz: str | None = None) -> str:
+    def format_caption(
+        self,
+        *,
+        embed_links: bool = False,
+        display_tz: str | None = None,
+        date_lang: str = "uk",
+    ) -> str:
         """Картка 1:1 як у Warsaw Rent (HTML)."""
         import html as html_lib
 
@@ -138,6 +144,7 @@ class Listing:
                     datetime.fromisoformat(self.extras["posted_iso"]),
                     display_tz,
                     show_time=show_time,
+                    lang=date_lang,
                 )
             except ValueError:
                 posted = self.posted_label or describe_posted(self.location)
@@ -896,17 +903,38 @@ _UK_MONTHS = {
     12: "грудня",
 }
 
+_PL_MONTHS = {
+    1: "stycznia",
+    2: "lutego",
+    3: "marca",
+    4: "kwietnia",
+    5: "maja",
+    6: "czerwca",
+    7: "lipca",
+    8: "sierpnia",
+    9: "września",
+    10: "października",
+    11: "listopada",
+    12: "grudnia",
+}
+
 
 def format_posted_dt(
     moment: datetime,
     display_tz: str | None = None,
     *,
     show_time: bool = True,
+    lang: str = "uk",
 ) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=ZoneInfo("UTC"))
-    zone = ZoneInfo(display_tz) if display_tz else WARSAW_TZ
+    zone = WARSAW_TZ if (not display_tz or lang == "pl") else ZoneInfo(display_tz)
     local = moment.astimezone(zone)
+    if lang == "pl":
+        line = f"Dodane {local.day} {_PL_MONTHS[local.month]} {local.year}"
+        if show_time:
+            line += f" o {local:%H:%M}"
+        return line
     line = f"Додано {local.day} {_UK_MONTHS[local.month]} {local.year}"
     if show_time:
         line += f" о {local:%H:%M}"

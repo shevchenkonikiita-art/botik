@@ -160,13 +160,41 @@ def watch_week_page(
 
 
 def watch_week_listings(filters: dict[str, Any], days: int = 7) -> list:
+    """Архів за 7 днів: збираємо всі картки, дати як на сайті (Warsaw), від найстарших."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from scraper import listing_posted_at, listing_posted_within
+
     kept: list = []
     for page_num in range(1, 7):
         batch, stop = watch_week_page(filters, page_num, days)
         kept.extend(batch)
         if stop:
             break
-    return _dedupe(kept)[:80]
+    matched = _dedupe(kept)[:60]
+    with _lock:
+        page = _ensure_page()
+        for item in matched:
+            need_date = listing_posted_at(item) is None
+            need_photo = not (item.photo_url or item.photos)
+            if not need_date and not need_photo and item.details_loaded:
+                continue
+            try:
+                enrich_on_page(page, item)
+            except Exception:
+                logger.warning("week enrich skip %s", item.id, exc_info=True)
+    fresh = []
+    for item in matched:
+        moment = listing_posted_at(item)
+        if moment is None or listing_posted_within(item, days):
+            if item.photo_url and not item.photos:
+                item.photos = [item.photo_url]
+            fresh.append(item)
+    oldest = datetime.min.replace(tzinfo=ZoneInfo("Europe/Warsaw"))
+    fresh.sort(key=lambda x: listing_posted_at(x) or oldest)
+    logger.info("week archive oldest→newest: %s", len(fresh))
+    return fresh
 
 
 def watch_enrich_many(listings: list, yield_to_user: bool = True) -> list:
