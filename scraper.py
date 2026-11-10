@@ -73,7 +73,9 @@ class Listing:
         if self.street:
             q = f"{self.street}, Poznań"
             return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)
-        district = self.district or _district_name(self.location)
+        district = detect_district(
+            self.title, self.location, self.district, self.raw_text[:800]
+        )
         if district:
             q = f"{district}, Poznań"
             return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)
@@ -87,7 +89,9 @@ class Listing:
         import html as html_lib
 
         title = html_lib.escape(self.title)
-        district = self.district or _district_name(self.location)
+        district = detect_district(
+            self.title, self.location, self.district, self.raw_text[:800]
+        )
         maps = self.maps_url()
         rent = self.rent_zl
         czynsz = self.czynsz_zl if self.czynsz_zl is not None else 0
@@ -334,6 +338,12 @@ def _stamp_posted_from_card(listing: Listing, text: str) -> None:
 
 
 def _enrich(listing: Listing) -> Listing:
+    listing.district = (
+        detect_district(listing.title, listing.location, listing.raw_text[:1200])
+        or listing.district
+    )
+    if listing.district and _NOT_DISTRICT.search(listing.district):
+        listing.district = detect_district(listing.title, listing.raw_text[:1200])
     listing.price_info = analyze_price(listing.price, listing.raw_text)
     listing.owner_hint = _infer_owner(listing.raw_text)
     listing.pets_hint = _infer_pets(listing.raw_text)
@@ -400,12 +410,34 @@ def _in_poznan(listing: Listing) -> bool:
     return any(d.lower() in blob for d in DISTRICTS)
 
 
+_NOT_DISTRICT = re.compile(
+    r"wielkopolsk|małopolsk|malopolsk|mazowieck|śląsk|slask|dolnośl|podkarpack",
+    re.IGNORECASE,
+)
+
+
+def detect_district(*parts: str) -> str:
+    """Район Познані з назви/адреси. Воєводство (wielkopolskie) — не район."""
+    blob = " ".join(p for p in parts if p)
+    low = blob.lower()
+    for name in sorted(DISTRICTS, key=len, reverse=True):
+        if name.lower() in low:
+            return name
+    return ""
+
+
 def _matches_districts(listing: Listing, districts: list[str]) -> bool:
     if not districts:
         return True
-    loc = listing.location.lower()
-    title = listing.title.lower()
-    return any(d.lower() in loc or d.lower() in title for d in districts)
+    found = detect_district(
+        listing.title,
+        listing.location,
+        listing.district,
+        listing.raw_text[:1200],
+    )
+    if not found:
+        return False
+    return found in districts
 
 
 def _matches_rooms(listing: Listing, rooms: list[int]) -> bool:
@@ -799,12 +831,18 @@ def fetch_facebook_listings(filters: dict[str, Any], limit: int, page) -> list[L
 
 
 def _district_name(location: str) -> str:
-    if not location:
+    found = detect_district(location)
+    if found:
+        return found
+    if not location or _NOT_DISTRICT.search(location):
         return ""
     match = re.search(r"Pozna[nń]\s*,\s*([^-\n,]+)", location, re.IGNORECASE)
     if match:
-        return match.group(1).strip()
-    return location.split("-")[0].replace("Poznań", "").replace("Poznan", "").strip(" ,")
+        raw = match.group(1).strip()
+        if _NOT_DISTRICT.search(raw):
+            return ""
+        return raw
+    return ""
 
 
 def _pl_int(text: str) -> int | None:
@@ -1191,7 +1229,12 @@ def _apply_detail_text(listing: Listing, blob: str) -> None:
         if rent_m:
             rent = _pl_int(rent_m.group(1))
     listing.rent_zl = rent
-    listing.district = _district_name(listing.location) or listing.district
+    listing.district = (
+        detect_district(listing.title, listing.location, blob[:1200])
+        or listing.district
+    )
+    if listing.district and _NOT_DISTRICT.search(listing.district):
+        listing.district = detect_district(listing.title, blob[:1200])
     czynsz = listing.czynsz_zl if listing.czynsz_zl is not None else 0
     if rent is not None:
         listing.price_info = PriceBreakdown(

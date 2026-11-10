@@ -342,8 +342,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_message(
             chat_id=user_id,
             text=(
-                "✅ Це всі знайдені за 7 днів.\n"
-                "Нові оголошення й далі приходитимуть автоматично, щойно з’являться."
+                f"✅ Надіслав {len(week)} оголошень за останні 7 днів "
+                "під твої фільтри (район, ціна, кімнати).\n"
+                "Нові й далі приходитимуть самі."
             ),
             reply_markup=main_menu_keyboard(),
         )
