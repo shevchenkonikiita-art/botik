@@ -39,7 +39,7 @@ from handlers.texts import (
     wizard_districts_text,
     wizard_rooms_text,
 )
-from scraper import Listing, listing_matches_user, listing_record
+from scraper import Listing, listing_matches_user, listing_posted_within, listing_record
 from watch_browser import user_search_listings, watch_enrich_many, watch_week_listings
 
 logger = logging.getLogger(__name__)
@@ -76,10 +76,16 @@ async def _edit(update: Update, text: str, reply_markup=None) -> None:
 
 
 async def _run_search(filters: dict[str, Any], limit: int = 8) -> list[Listing]:
-    listings = await run_browser(user_search_listings, filters, limit)
+    listings = await run_browser(user_search_listings, filters, max(limit, 16))
+    listings = [
+        x for x in listings if listing_matches_user(x, filters) and listing_posted_within(x, 7)
+    ][:limit]
     if listings:
         listings = await run_browser(watch_enrich_many, listings)
-    return listings
+    listings = [
+        x for x in listings if listing_matches_user(x, filters) and listing_posted_within(x, 7)
+    ]
+    return listings[:limit]
 
 
 def _store_listings(listings: list[Listing]) -> None:
@@ -253,21 +259,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             main_menu_keyboard(),
         )
         try:
-            listings = await _run_search(filters, limit=8)
+            listings = await asyncio.wait_for(_run_search(filters, limit=8), timeout=120)
+        except TimeoutError:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="⏱ Пошук занадто довгий. Спробуй ще раз через хвилину.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
         except Exception as exc:
             logger.exception("search failed")
             await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
             return
         if not listings:
             await context.bot.send_message(
-                chat_id=user_id, text="Нічого не знайшов за активними фільтрами."
+                chat_id=user_id,
+                text="Немає свіжих оголошень за останні 7 днів під твої фільтри.",
+                reply_markup=main_menu_keyboard(),
             )
             return
         _store_listings(listings)
         seen = db.load_seen()
         for item in listings:
-            if not listing_matches_user(item, filters):
-                continue
             seen.add(item.id)
             db.upsert_catalog(listing_record(item))
             await send_listing(context, user_id, item)

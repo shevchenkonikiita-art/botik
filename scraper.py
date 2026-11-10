@@ -316,15 +316,19 @@ def _infer_rooms(text: str) -> int | None:
 
 
 def _stamp_posted_from_card(listing: Listing, text: str) -> None:
-    """Дата з картки списку (до відкриття detail)."""
+    """Дата з картки списку (до відкриття detail) — лише «Dodane …», не весь опис."""
     if listing.extras.get("posted_iso"):
         return
-    moment = parse_pl_datetime(text)
+    dodane = re.search(r"Dodane\s+([^\n]{3,80})", text, re.IGNORECASE)
+    snippet = dodane.group(1) if dodane else ""
+    moment = parse_pl_datetime(snippet) if snippet else None
+    if moment:
+        moment = _plausible_posted(moment)
     if moment:
         listing.extras["posted_iso"] = moment.isoformat()
         listing.posted_label = format_posted_dt(moment)
-    else:
-        label = describe_posted(text)
+    elif snippet:
+        label = describe_posted(snippet)
         if label:
             listing.posted_label = label
 
@@ -1029,6 +1033,24 @@ _MONTHS = {
 }
 
 
+def _plausible_posted(
+    moment: datetime, now: datetime | None = None
+) -> datetime | None:
+    """Корекція року (без року OLX часто ставить поточний) і відсікання неможливих дат."""
+    now = _as_warsaw(now or datetime.now(WARSAW_TZ))
+    moment = _as_warsaw(moment)
+    if moment > now + timedelta(hours=6):
+        try:
+            moment = moment.replace(year=moment.year - 1)
+        except ValueError:
+            return None
+    if moment > now + timedelta(hours=6):
+        return None
+    if moment < now - timedelta(days=450):
+        return None
+    return moment
+
+
 def parse_pl_datetime(text: str, now: datetime | None = None) -> datetime | None:
     """Дата з польського тексту картки або сторінки оголошення."""
     if not text:
@@ -1050,9 +1072,12 @@ def parse_pl_datetime(text: str, now: datetime | None = None) -> datetime | None
         return None
     year = int(match.group(3)) if match.group(3) else now.year
     try:
-        return _as_warsaw(datetime(year, month, int(match.group(1))))
+        moment = _as_warsaw(datetime(year, month, int(match.group(1))))
     except ValueError:
         return None
+    if not match.group(3):
+        return _plausible_posted(moment, now)
+    return moment
 
 
 def listing_posted_at(listing: Listing) -> datetime | None:
@@ -1062,32 +1087,44 @@ def listing_posted_at(listing: Listing) -> datetime | None:
             moment = datetime.fromisoformat(iso)
             if moment.tzinfo is None:
                 moment = moment.replace(tzinfo=ZoneInfo("UTC"))
-            return moment.astimezone(WARSAW_TZ)
+            moment = moment.astimezone(WARSAW_TZ)
+            return _plausible_posted(moment)
         except ValueError:
             pass
-    blob = " ".join(
-        x
-        for x in (listing.posted_label, listing.location, listing.raw_text[:800])
-        if x
-    )
-    return parse_pl_datetime(blob)
+    if listing.posted_label:
+        moment = parse_pl_datetime(listing.posted_label)
+        if moment:
+            return _plausible_posted(moment)
+    dodane = re.search(r"Dodane\s+([^\n]{3,80})", listing.raw_text, re.IGNORECASE)
+    if dodane:
+        moment = parse_pl_datetime(dodane.group(1))
+        if moment:
+            return _plausible_posted(moment)
+    return None
+
+
+def listing_posted_within(listing: Listing, days: int) -> bool:
+    """Для меню й алертів: лише з відомою датою в межах `days`."""
+    moment = listing_posted_at(listing)
+    if moment is None:
+        return False
+    cutoff = datetime.now(WARSAW_TZ) - timedelta(days=days)
+    return moment >= cutoff
 
 
 def is_within_days(listing: Listing, days: int = 7, *, strict: bool = False) -> bool:
+    if strict or days <= 14:
+        return listing_posted_within(listing, days)
     moment = listing_posted_at(listing)
     if moment is None:
-        return not strict
+        return False
     cutoff = datetime.now(WARSAW_TZ) - timedelta(days=days)
     return moment >= cutoff
 
 
 def is_fresh_for_watch(listing: Listing, days: int) -> bool:
-    """Нове зі стрічки LATEST: без дати вважаємо новим; відсікаємо лише явно старі."""
-    moment = listing_posted_at(listing)
-    if moment is None:
-        return True
-    cutoff = datetime.now(WARSAW_TZ) - timedelta(days=days)
-    return moment >= cutoff
+    """Авто-сповіщення: лише з датою в межах вікна (після enrich)."""
+    return listing_posted_within(listing, days)
 
 
 def _apply_detail_text(listing: Listing, blob: str) -> None:
@@ -1247,7 +1284,9 @@ def enrich_on_page(page, listing: Listing) -> Listing:
         if posted_dt:
             if visible_dt:
                 posted_dt = visible_dt
-            listing.extras["posted_iso"] = _as_warsaw(posted_dt).isoformat()
+            posted_dt = _plausible_posted(_as_warsaw(posted_dt))
+            if posted_dt:
+                listing.extras["posted_iso"] = posted_dt.isoformat()
         photos = _read_photos(page) or _photos_from_html(html)
         if photos:
             listing.photos = photos
@@ -1330,12 +1369,7 @@ def search_listings(
 
 
 def _in_last_days_window(listing: Listing, days: int) -> bool:
-    """7 днів: точна дата якщо є, інакше евристика з картки."""
-    cutoff = datetime.now(WARSAW_TZ) - timedelta(days=days)
-    moment = listing_posted_at(listing)
-    if moment is not None:
-        return moment >= cutoff
-    return is_within_days(listing, days, strict=False)
+    return listing_posted_within(listing, days)
 
 
 def _collect_last_days_raw(
