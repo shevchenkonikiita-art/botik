@@ -1,0 +1,16 @@
+---
+description: Після змін у боті — commit і push на GitHub (botik)
+alwaysApply: true
+---
+
+# GitHub sync після оновлень FindHome
+
+Після **будь-яких змін у коді/конфігу бота** у цьому проєкті (крім чисто інформаційних відповідей без правок файлів):
+
+1. Переконайся, що в коміт не потрапляють секрети: `.env`, `*.db`, `findhome.db`, токени.
+2. `git status` → додай лише релевантні файли → `git commit` з коротким змістовним повідомленням.
+3. **Завжди** `git push origin main` на `https://github.com/shevchenkonikiita-art/botik.git`.
+4. Якщо push відхилено — `git pull --rebase origin main` (або вирівняй з remote), потім push знову. **Не** `--force` без явного запиту користувача.
+5. У відповіді коротко скажи, що запушено (коміт / лінк на репо).
+
+Remote уже налаштований як `origin`; гілка — `main`.
