@@ -16,7 +16,6 @@ from scraper import (
     fetch_olx_listings,
     fetch_otodom_listings,
 )
-from config import DEFAULT_FILTERS
 
 logger = logging.getLogger(__name__)
 
