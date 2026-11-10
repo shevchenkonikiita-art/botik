@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# /data — тримай через Railway Volume (Settings → mount /data), не VOLUME в Dockerfile
 RUN mkdir -p /data
-VOLUME ["/data"]
 
 CMD ["python", "main.py"]
