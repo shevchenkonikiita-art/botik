@@ -1,0 +1,12 @@
+services:
+  findhome:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FINDHOME_DATA_DIR: /data
+    volumes:
+      - findhome_data:/data
+
+volumes:
+  findhome_data:

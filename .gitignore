@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+findhome.db
+seen_listings.json
+.playwright/
+handlers/__pycache__/
