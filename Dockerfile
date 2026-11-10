@@ -1,5 +1,5 @@
-# Playwright + Chromium для OLX/Otodom (headless)
-FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
+# Railway забороняє VOLUME (навіть у батьківському образі) — збираємо Playwright самі
+FROM python:3.12-bookworm
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
@@ -7,11 +7,10 @@ ENV FINDHOME_DATA_DIR=/data
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install --with-deps chromium
 
 COPY . .
-
-# /data — тримай через Railway Volume (Settings → mount /data), не VOLUME в Dockerfile
 RUN mkdir -p /data
 
 CMD ["python", "main.py"]
