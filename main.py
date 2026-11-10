@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from browser_executor import run_browser
+from browser_executor import run_browser, user_waiting
 
 from telegram import BotCommand, MenuButtonCommands, Update
 from telegram.ext import (
@@ -91,6 +91,8 @@ async def post_init(app: Application) -> None:
 
 
 async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if user_waiting():
+        return
     users = db.list_active_users()
     if not users:
         return
@@ -125,11 +127,14 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     ready = [uid for uid in users if user_filters[uid].get("setup_done")]
-    to_enrich = [
+    matched = [
         x
         for x in unseen
         if any(watch_might_match_user(x, user_filters[uid]) for uid in ready)
     ]
+    to_enrich = matched[:6]
+    # решта підхожих лишаються unseen на наступний цикл; чужі — позначаємо одразу
+    drop_ids = [x.id for x in unseen if x not in matched]
     if to_enrich:
         try:
             await run_browser(watch_enrich_many, to_enrich)
@@ -138,7 +143,7 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     brand_new = [
         x
-        for x in unseen
+        for x in to_enrich
         if is_fresh_for_watch(x, NEW_LISTING_MAX_AGE_DAYS)
     ]
     brand_new.sort(
@@ -146,7 +151,7 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         or datetime.now(timezone.utc),
         reverse=True,
     )
-    db.mark_seen_many([x.id for x in unseen])
+    db.mark_seen_many(drop_ids + [x.id for x in to_enrich])
 
     if not brand_new:
         return
@@ -173,6 +178,7 @@ def main() -> None:
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(True)
         .post_init(post_init)
         .build()
     )

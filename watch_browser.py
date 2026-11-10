@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import Any
 
+from browser_executor import user_waiting
 from config import DEFAULT_FILTERS, WATCH_PAGES
 from scraper import (
     _collect_last_days_raw,
@@ -75,6 +76,9 @@ def watch_fetch_listings(filters: dict[str, Any], per_source: int) -> list:
         page = _ensure_page()
         collected: list = []
         for page_num in range(1, WATCH_PAGES + 1):
+            if user_waiting():
+                logger.info("watch fetch yields to menu button")
+                break
             for fetcher in (fetch_olx_listings, fetch_otodom_listings):
                 try:
                     collected.extend(
@@ -128,6 +132,9 @@ def watch_enrich_many(listings: list) -> list:
             if not x.details_loaded and "facebook.com" not in (x.url or "")
         ]
         for item in pending:
+            if user_waiting():
+                logger.info("watch enrich yields to menu button")
+                break
             try:
                 enrich_on_page(page, item)
             except Exception:

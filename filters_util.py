@@ -32,12 +32,12 @@ def watch_might_match_user(listing, filters: dict[str, Any]) -> bool:
     max_p = int(f.get("max_price") or 99999)
     info = listing.price_info or analyze_price(listing.price, listing.raw_text)
     listing.price_info = info
-    if info.total_zl is not None and fits_budget(info, int(f.get("min_price") or 0), max_p):
+    if info.total is not None and fits_budget(info, int(f.get("min_price") or 0), max_p):
         return True
     # оренда на картці може бути без czynsz — допускаємо типовий чинш
-    if info.rent_zl is not None and info.rent_zl <= max_p + 900:
+    if info.base is not None and info.base <= max_p + 900:
         return True
-    return info.rent_zl is None and info.total_zl is None
+    return info.base is None and info.total is None
 
 
 def merge_filters_for_watch(user_filters: list[dict[str, Any]]) -> dict[str, Any]:

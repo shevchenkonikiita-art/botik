@@ -11,7 +11,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 import db
-from browser_executor import run_browser
+from browser_executor import run_browser, user_first_off, user_first_on
 from config import BUDGET_RANGES, DISTRICTS
 from handlers.keyboards import (
     budget_settings_keyboard,
@@ -258,33 +258,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "🔍 Шукаю на OLX і Otodom…",
             main_menu_keyboard(),
         )
+        user_first_on()
         try:
-            listings = await asyncio.wait_for(_run_search(filters, limit=8), timeout=120)
-        except TimeoutError:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="⏱ Пошук занадто довгий. Спробуй ще раз через хвилину.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-        except Exception as exc:
-            logger.exception("search failed")
-            await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
-            return
-        if not listings:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="Немає свіжих оголошень за останні 7 днів під твої фільтри.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-        _store_listings(listings)
-        seen = db.load_seen()
-        for item in listings:
-            seen.add(item.id)
-            db.upsert_catalog(listing_record(item))
-            await send_listing(context, user_id, item)
-        db.save_seen(seen)
+            try:
+                listings = await asyncio.wait_for(_run_search(filters, limit=8), timeout=90)
+            except TimeoutError:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⏱ Пошук занадто довгий. Спробуй ще раз через хвилину.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+            except Exception as exc:
+                logger.exception("search failed")
+                await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
+                return
+            if not listings:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="Немає свіжих оголошень за останні 7 днів під твої фільтри.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+            _store_listings(listings)
+            seen = db.load_seen()
+            for item in listings:
+                seen.add(item.id)
+                db.upsert_catalog(listing_record(item))
+                await send_listing(context, user_id, item)
+            db.save_seen(seen)
+        finally:
+            user_first_off()
         return
 
     if data == "menu:week":
@@ -296,58 +300,55 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "Це може зайняти близько хвилини — надішлю всі картки одразу."
             ),
         )
+        user_first_on()
         try:
-            week = await asyncio.wait_for(
-                run_browser(watch_week_listings, filters, 7),
-                timeout=200,
+            try:
+                week = await asyncio.wait_for(
+                    run_browser(watch_week_listings, filters, 7),
+                    timeout=90,
+                )
+            except TimeoutError:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="⏱ Занадто довго. Спробуй «Показати зараз».",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+            except Exception as exc:
+                logger.exception("week search failed")
+                await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
+                return
+            if not week:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="За 7 днів під ці фільтри нічого не знайшов.",
+                    reply_markup=main_menu_keyboard(),
+                )
+                return
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"Знайшов {len(week)}. Надсилаю.",
             )
-        except TimeoutError:
+            seen = db.load_seen()
+            for item in week:
+                db.upsert_catalog(listing_record(item))
+                seen.add(item.id)
+                try:
+                    await send_listing(context, user_id, item)
+                except Exception:
+                    logger.exception("week send failed %s", item.id)
+            db.save_seen(seen)
             await context.bot.send_message(
                 chat_id=user_id,
                 text=(
-                    "⏱ Занадто довго (Railway). Спробуй «Показати зараз» — "
-                    "або «За 7 днів» ще раз через хвилину."
+                    f"✅ Надіслав {len(week)} оголошень за останні 7 днів "
+                    "під твої фільтри.\n"
+                    "Нові й далі приходитимуть самі."
                 ),
                 reply_markup=main_menu_keyboard(),
             )
-            return
-        except Exception as exc:
-            logger.exception("week search failed")
-            await context.bot.send_message(chat_id=user_id, text=f"Помилка: {exc}")
-            return
-        if not week:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="За 7 днів під ці фільтри нічого не знайшов.",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"Знайшов {len(week)}. Надсилаю всі.",
-        )
-        seen = db.load_seen()
-        for index, item in enumerate(week, start=1):
-            db.upsert_catalog(listing_record(item))
-            seen.add(item.id)
-            try:
-                await send_listing(context, user_id, item)
-            except Exception:
-                logger.exception("week send failed %s", item.id)
-            if index % 8 == 0:
-                await context.bot.send_message(
-                    chat_id=user_id, text=f"Надіслано {index} з {len(week)}…"
-                )
-        db.save_seen(seen)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"✅ Надіслав {len(week)} оголошень за останні 7 днів "
-                "під твої фільтри (район, ціна, кімнати).\n"
-                "Нові й далі приходитимуть самі."
-            ),
-            reply_markup=main_menu_keyboard(),
-        )
+        finally:
+            user_first_off()
         return
 
     if data == "menu:catalog":

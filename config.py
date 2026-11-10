@@ -75,7 +75,7 @@ SOURCES = ("olx", "otodom", "facebook")
 # 1 с неможливо — один прохід браузером ~20–40 с; мінімум 10 с (через .env).
 # Приклад у .env: CHECK_INTERVAL=15
 # Warsaw Rent ≈ 1 хв; у .env можна 10–15 для агресивнішого режиму.
-CHECK_INTERVAL = max(10, int(os.getenv("CHECK_INTERVAL", "20")))
+CHECK_INTERVAL = max(10, int(os.getenv("CHECK_INTERVAL", "45")))
 
 # Автоповідомлення: ігноруємо лише явно старі (дата відома і > N днів).
 NEW_LISTING_MAX_AGE_DAYS = max(1, int(os.getenv("NEW_LISTING_MAX_AGE_DAYS", "14")))
